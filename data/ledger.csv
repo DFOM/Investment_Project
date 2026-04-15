@@ -1,0 +1,2 @@
+Timestamp,Ticker,Action,Quantity,Local_Asset_Price,Executed_FX_Rate,Total_JPY_Impact,Remaining_JPY_Balance,Trader_Name,Commission_Paid,FX_Conversion_Fee_Paid
+2026-04-06T09:56:41.156285+00:00,JPY_CASH,INITIAL_FUNDING,0.000000,1.000000,1.000000,100000000.00,100000000.00,System,0.00,0.00

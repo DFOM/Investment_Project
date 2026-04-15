@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-15T13:47:37.139375+00:00",
+  "members": [
+    {
+      "id": "ce5dcbad-acde-418a-9bde-3878f72e9d6e",
+      "name": "Hasan",
+      "aliases": [
+        "Hasan"
+      ],
+      "active": true,
+      "created_at": "2026-04-06T10:43:06.092446+00:00",
+      "updated_at": "2026-04-06T12:41:29.031100+00:00"
+    },
+    {
+      "id": "f956d989-b307-406b-9201-aa2f00203bd4",
+      "name": "Hoan",
+      "aliases": [
+        "Hoan"
+      ],
+      "active": true,
+      "created_at": "2026-04-06T10:43:09.046578+00:00",
+      "updated_at": "2026-04-06T12:41:33.066200+00:00"
+    },
+    {
+      "id": "f1311579-2256-4013-92da-4d3e713aff92",
+      "name": "Sawyer",
+      "aliases": [
+        "Sawyer"
+      ],
+      "active": true,
+      "created_at": "2026-04-15T13:39:07.202110+00:00",
+      "updated_at": "2026-04-15T13:39:07.202110+00:00"
+    }
+  ]
+}
