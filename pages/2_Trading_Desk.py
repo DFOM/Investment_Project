@@ -215,6 +215,7 @@ def main() -> None:
             ["-- Select group member --", *members],
             index=0,
         )
+        auth_code = st.text_input("Auth Code", type="password", help="Enter your 6-character authentication code.")
     with col_action_top:
         action = st.radio("Action", ["Buy", "Sell"], horizontal=True)
 
@@ -252,6 +253,7 @@ def main() -> None:
                 held_tickers,
                 index=default_sell_idx,
                 format_func=_sell_label,
+                key="sell_stock_selector",
             )
             # Clear stale estimate when the selected sell ticker changes
             if st.session_state.get("_sell_ticker_select") != ticker:
@@ -572,6 +574,7 @@ def main() -> None:
                             mode=_mode_map.get(est["sizing_mode"], "SHARES"),
                             value=f"{est['quantity']:.6f}",
                             rationale=est["rationale"],
+                                auth_code=auth_code,
                         )
                     except Exception as exc:
                         result = {"status": "error", "message": str(exc)}
@@ -587,11 +590,12 @@ def main() -> None:
                 with st.spinner("Submitting trade to Google Sheets\u2026"):
                     try:
                         result = execute_trade(
-                            est["action"],
-                            est["ticker"],
-                            est["quantity"],
-                            est["authorized_by"],
-                            est["rationale"],
+                                action=est["action"],
+                                ticker=est["ticker"],
+                                quantity=est["quantity"],
+                                trader_name=est["authorized_by"],
+                                rationale=est["rationale"],
+                                auth_code=auth_code,
                         )
                     except Exception as exc:
                         result = {"status": "error", "message": str(exc)}

@@ -238,12 +238,10 @@ def main() -> None:
     usd_jpy = get_current_usd_jpy(fallback=150.0) or 150.0
 
     # ── Cash balance ───────────────────────────────────────────────────────────
-    if scoped.empty:
+    if ledger.empty:
         cash = float(STARTING_JPY_BALANCE)
-    elif is_all:
-        cash = float(scoped["Remaining_JPY_Balance"].dropna().iloc[-1])
     else:
-        cash = float(STARTING_JPY_BALANCE) + float(scoped["Total_JPY_Impact"].sum())
+        cash = float(ledger["Remaining_JPY_Balance"].dropna().iloc[-1])
 
     # ── Live holdings sync ─────────────────────────────────────────────────────
     holdings = _net_holdings(scoped)
@@ -555,5 +553,3 @@ def main() -> None:
 
 
 main()
-
-

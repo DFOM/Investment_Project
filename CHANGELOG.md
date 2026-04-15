@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.1.2] - 2026-04-15
+### Fixed
+- Fixed the Dashboard to always display the true shared team cash balance, even when filtering analysis for a specific team member.
+- Fixed the Selectbox resetting issue on the Trading Desk's Sell tab by applying a unique widget key.
+- Updated Trading Desk to integrate the new `Auth_Code` requirement for executing and queueing trades.
+
+## [v1.1.1] - 2026-04-15
+### Fixed
+- Removed hardcoded placeholder member names; team members must now be explicitly added via the Admin Panel and are fetched exclusively from the Google Sheets database.
+
 ## [v1.1.0] - 2026-04-15
 ### Added
 - Pure Google Sheets-based Team Authentication system (`Team_Auth` worksheet).
