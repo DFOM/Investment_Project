@@ -225,6 +225,7 @@ col_left, col_right = st.columns([1, 2])
 
 with col_left:
     trader_name = _member_selector()
+    auth_code = st.text_input("Auth Code", type="password", help="Enter your 6-character authentication code.")
 
     usd_jpy = float(get_current_usd_jpy(fallback=150.0) or 150.0)
     st.caption(f"Live USD/JPY rate: **{usd_jpy:.2f}**")
@@ -250,16 +251,22 @@ with col_right:
 if collect_btn:
     if not trader_name:
         st.error("Select a team member before collecting dividends.")
+    elif not auth_code:
+        st.error("Please enter your authentication code.")
     else:
         with st.spinner("Scanning holdings and fetching dividend data…"):
-            results = collect_all_dividends(trader_name)
+            try:
+                results = collect_all_dividends(trader_name, auth_code)
+            except PermissionError as e:
+                st.error(str(e))
+                results = None
 
-        if not results:
+        if results is not None and not results:
             st.info(
                 "✅ No new dividends to collect. Either your holdings do not pay "
                 "dividends or all dividends have already been collected."
             )
-        else:
+        elif results:
             total_gross = sum(e["gross_jpy"] for events in results.values() for e in events)
             total_tax = sum(e["total_tax_jpy"] for events in results.values() for e in events)
             total_net = sum(e["net_jpy"] for events in results.values() for e in events)

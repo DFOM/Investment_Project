@@ -430,7 +430,7 @@ def collect_dividends_for_ticker(
     return results
 
 
-def collect_all_dividends(trader_name: str) -> dict[str, list[dict]]:
+def collect_all_dividends(trader_name: str, auth_code: str = "") -> dict[str, list[dict]]:
     """
     Scan every current holding and collect any dividends that have not yet
     been credited to the account.
@@ -443,6 +443,10 @@ def collect_all_dividends(trader_name: str) -> dict[str, list[dict]]:
     -------
     ``{ticker: [event_result_dicts]}`` — only tickers with new dividends.
     """
+    from core.user_manager import authenticate_user
+    if not authenticate_user(trader_name, auth_code):
+        raise PermissionError(f"Authentication failed for {trader_name}. Invalid code.")
+
     holdings = get_current_holdings()
     if not holdings:
         return {}

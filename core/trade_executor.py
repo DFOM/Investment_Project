@@ -162,7 +162,9 @@ def execute_trade(
     quantity: float,
     trader_name: str,
     rationale: str = "",  # NEW: student trade justification for grading
+    auth_code: str = "",  # NEW: verify user code
 ) -> dict[str, float | str]:
+    from core.user_manager import authenticate_user
     normalized_action = _normalize_action(action)
     symbol = _normalize_ticker(ticker)
 
@@ -173,6 +175,14 @@ def execute_trade(
             "message": "Trader_Name is required",
             "remaining_jpy_balance": _latest_balance(),
         }
+
+    if auth_code != "AUTO" and student.casefold() != "system":
+        if not authenticate_user(student, auth_code):
+            return {
+                "status": "error",
+                "message": f"Authentication failed for {student}. Invalid code.",
+                "remaining_jpy_balance": _latest_balance(),
+            }
 
     if not _is_market_open(symbol):
         return {
@@ -305,6 +315,7 @@ def queue_order(
     mode: str,
     value: str,
     rationale: str = "",
+    auth_code: str = "",
 ) -> dict[str, str]:
     """Write a pending order to the Order_Book worksheet instead of the Ledger.
 
@@ -317,14 +328,19 @@ def queue_order(
     mode:        "SHARES", "FIXED_JPY", or "PERCENT"
     value:       raw input value as a string (shares / jpy / pct)
     rationale:   optional trade justification
+    auth_code:   trader's private authentication code
     """
     from core.database import get_database, ORDER_BOOK_COLUMNS  # local to avoid circular
+    from core.user_manager import authenticate_user
 
     normalized_action = _normalize_action(action)
     symbol = _normalize_ticker(ticker)
     student = trader_name.strip()
     if not student:
         return {"status": "error", "message": "Trader_Name is required."}
+
+    if not authenticate_user(student, auth_code):
+        return {"status": "error", "message": f"Authentication failed for {student}. Invalid code."}
 
     row = {
         "Timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
@@ -433,6 +449,7 @@ def process_pending_orders() -> list[dict]:
             quantity=quantity,
             trader_name=trader_name,
             rationale=f"[Market-Open Auto-Execution] {rationale}",
+            auth_code="AUTO",
         )
 
         result["order_timestamp"] = timestamp

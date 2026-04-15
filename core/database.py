@@ -13,6 +13,7 @@ from google.oauth2.service_account import Credentials
 LEDGER_WORKSHEET_NAME: Final[str] = "Ledger"
 PERFORMANCE_WORKSHEET_NAME: Final[str] = "Performance"
 ORDER_BOOK_WORKSHEET_NAME: Final[str] = "Order_Book"
+TEAM_AUTH_WORKSHEET_NAME: Final[str] = "Team_Auth"
 
 LEDGER_COLUMNS: Final[list[str]] = [
     "Timestamp",
@@ -39,6 +40,7 @@ ORDER_BOOK_COLUMNS: Final[list[str]] = [
     "Status",
     "Trader_Name",
 ]
+TEAM_AUTH_COLUMNS: Final[list[str]] = ["Trader_Name", "Auth_Code", "Active", "Created_At"]
 
 GOOGLE_CREDENTIALS_ENV: Final[str] = "GOOGLE_CREDENTIALS"
 GOOGLE_CREDENTIALS_FILE_ENV: Final[str] = "GOOGLE_CREDENTIALS_FILE"
@@ -445,6 +447,38 @@ class GoogleSheetsDatabase:
         payload = [row.get(col, "") for col in ORDER_BOOK_COLUMNS]
         ws.append_row(payload)
 
+    def get_team_auth_df(self) -> pd.DataFrame:
+        ws = self._ensure_worksheet_with_headers(TEAM_AUTH_WORKSHEET_NAME, TEAM_AUTH_COLUMNS)
+        records = ws.get_all_records()
+        df = pd.DataFrame(records)
+        if df.empty:
+            return pd.DataFrame(columns=TEAM_AUTH_COLUMNS)
+        return df
+
+    def upsert_team_auth(self, trader_name: str, auth_code: str, active: bool = True) -> None:
+        ws = self._ensure_worksheet_with_headers(TEAM_AUTH_WORKSHEET_NAME, TEAM_AUTH_COLUMNS)
+        records = ws.get_all_records()
+        now = datetime.now(timezone.utc).isoformat()
+        for index, existing in enumerate(records, start=2):
+            if str(existing.get("Trader_Name", "")).strip().casefold() == trader_name.strip().casefold():
+                created_at = str(existing.get("Created_At", now))
+                if not created_at:
+                    created_at = now
+                payload = [[trader_name, auth_code, str(active), created_at]]
+                ws.update(payload, f"A{index}:D{index}")
+                return
+        payload = [trader_name, auth_code, str(active), now]
+        ws.append_row(payload)
+
+    def rename_team_auth(self, old_name: str, new_name: str) -> bool:
+        ws = self._ensure_worksheet_with_headers(TEAM_AUTH_WORKSHEET_NAME, TEAM_AUTH_COLUMNS)
+        records = ws.get_all_records()
+        for index, existing in enumerate(records, start=2):
+            if str(existing.get("Trader_Name", "")).strip().casefold() == old_name.strip().casefold():
+                ws.update_cell(index, 1, new_name)
+                return True
+        return False
+
     def get_order_book_df(self) -> pd.DataFrame:
         ws = self._ensure_worksheet_with_headers(ORDER_BOOK_WORKSHEET_NAME, ORDER_BOOK_COLUMNS)
         records = ws.get_all_records()
@@ -640,6 +674,10 @@ def get_cached_performance_df() -> pd.DataFrame:
     """Return the Performance tab as a DataFrame (cached for 60 s inside Streamlit)."""
     return get_database().get_performance_df()
 
+def get_cached_team_auth_df() -> pd.DataFrame:
+    """Return the Team Auth tab as a DataFrame."""
+    return get_database().get_team_auth_df()
+
 
 def clear_data_cache() -> None:
     """Bust all @st.cache_data caches.  Must be called after every write so the
@@ -656,6 +694,7 @@ try:
     import streamlit as _st
     get_cached_ledger_df = _st.cache_data(ttl=60)(get_cached_ledger_df)
     get_cached_performance_df = _st.cache_data(ttl=60)(get_cached_performance_df)
+    get_cached_team_auth_df = _st.cache_data(ttl=60)(get_cached_team_auth_df)
     del _st
 except Exception:
     pass
