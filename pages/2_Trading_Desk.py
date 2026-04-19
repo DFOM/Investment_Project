@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from core.database import get_database
-from core.market_data import get_current_usd_jpy, get_executed_fx_quote, get_live_price
+from core.market_data import get_current_usd_jpy, get_executed_fx_quote, get_live_price, get_company_name
 from core.setup_env import setup_environment
 from core.trade_executor import execute_trade, get_cash_balance, queue_order, process_pending_orders, is_market_open, exchange_name
 from core.user_manager import ensure_team_config, get_active_member_names
@@ -288,9 +288,15 @@ def main() -> None:
         try:
             market_open = is_market_open(ticker)
             exch = exchange_name(ticker)
+            company_name = get_company_name(ticker)
         except Exception:
             market_open = False
             exch = "Unknown"
+            company_name = ticker
+        
+        # Display company name and market status
+        st.write(f"**{company_name}** ({ticker}) — Listed on {exch}")
+        
         if market_open:
             timing = "Execute Now (Market)"
             with col_timing:
@@ -660,19 +666,26 @@ def main() -> None:
                     st.rerun()
 
             for i, row in pending.iterrows():
+                ticker = row.get('Ticker', '?').strip().upper()
+                try:
+                    company_name = get_company_name(ticker)
+                except Exception:
+                    company_name = ticker
+                
+                action_emoji = "🛒" if row.get('Action', '').upper() == "BUY" else "💰"
                 label = (
-                    f"{row.get('Action', '?')} \u00b7 {row.get('Ticker', '?')} \u00b7 "
-                    f"{row.get('Mode', '?')} = {row.get('Value', '?')} \u00b7 "
-                    f"{row.get('Timestamp', '')[:19].replace('T', ' ')} UTC"
+                    f"{action_emoji} {row.get('Action', '?')} {row.get('Value', '?')} ({company_name}) — "
+                    f"Mode: {row.get('Mode', '?')} — {row.get('Timestamp', '')[:16].replace('T', ' ')} UTC"
                 )
                 with st.expander(label, expanded=False):
                     detail_cols = st.columns([3, 1])
                     with detail_cols[0]:
                         st.markdown(
-                            f"**Ticker:** {row.get('Ticker', '')}  \n"
+                            f"**Ticker:** {ticker} ({company_name})  \n"
                             f"**Action:** {row.get('Action', '')}  \n"
                             f"**Mode:** {row.get('Mode', '')}  \n"
                             f"**Value:** {row.get('Value', '')}  \n"
+                            f"**Trader:** {row.get('Trader_Name', 'N/A')}  \n"
                             f"**Rationale:** {row.get('Rationale', '')}  \n"
                             f"**Queued at:** {row.get('Timestamp', '')}"
                         )

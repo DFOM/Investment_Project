@@ -29,7 +29,7 @@ LEDGER_COLUMNS: Final[list[str]] = [
     "FX_Conversion_Fee",
     "Trade_Rationale",  # NEW: student justification required for grading
 ]
-PERFORMANCE_COLUMNS: Final[list[str]] = ["date", "portfolio_value_jpy"]
+PERFORMANCE_COLUMNS: Final[list[str]] = ["date", "Trader_Name", "portfolio_value_jpy"]
 ORDER_BOOK_COLUMNS: Final[list[str]] = [
     "Timestamp",
     "Ticker",
@@ -372,7 +372,7 @@ class GoogleSheetsDatabase:
         performance_ws.update([PERFORMANCE_COLUMNS], "A1")
         self._format_header_row(performance_ws, PERFORMANCE_COLUMNS)
         performance_ws.update(
-            [[datetime.now(timezone.utc).date().isoformat(), f"{float(starting_capital):.2f}"]],
+            [[datetime.now(timezone.utc).date().isoformat(), "All Team", f"{float(starting_capital):.2f}"]],
             "A2",
         )
 
@@ -530,14 +530,16 @@ class GoogleSheetsDatabase:
     def upsert_performance_row(self, row: dict[str, Any]) -> None:
         self.ensure_schema()
         target_date = str(row.get("date", "")).strip()
+        trader_name = str(row.get("Trader_Name", "All Team")).strip()
         if not target_date:
             raise ValueError("Performance row requires a non-empty 'date'.")
 
         records = self._performance_ws.get_all_records()
         for index, existing in enumerate(records, start=2):
-            if str(existing.get("date", "")).strip() == target_date:
+            if str(existing.get("date", "")).strip() == target_date and str(existing.get("Trader_Name", "All Team")).strip() == trader_name:
                 payload = [[row.get(col, "") for col in PERFORMANCE_COLUMNS]]
-                self._performance_ws.update(payload, f"A{index}:B{index}")
+                end_col = self._column_letter(len(PERFORMANCE_COLUMNS))
+                self._performance_ws.update(payload, f"A{index}:{end_col}{index}")
                 return
 
         self.append_performance_row(row)
@@ -626,12 +628,15 @@ class GoogleSheetsDatabase:
         usd_jpy = get_current_usd_jpy(fallback=150.0) or 150.0
         equity_jpy = 0.0
         skipped: list[str] = []
+        live_prices: dict[str, float] = {}
 
         for ticker, qty in holdings.items():
             price = get_live_price(ticker, fallback=None)
             if price is None:
                 skipped.append(ticker)
                 continue
+            
+            live_prices[ticker] = float(price)
             if ticker.upper().endswith(".T"):
                 equity_jpy += qty * float(price)
             else:
@@ -640,7 +645,30 @@ class GoogleSheetsDatabase:
         total_jpy = cash + equity_jpy
         today = datetime.now(timezone.utc).date().isoformat()
 
-        self.upsert_performance_row({"date": today, "portfolio_value_jpy": f"{total_jpy:.2f}"})
+        self.upsert_performance_row({"date": today, "Trader_Name": "All Team", "portfolio_value_jpy": f"{total_jpy:.2f}"})
+
+        # Track per-member performance
+        unique_traders = [t for t in df["Trader_Name"].unique() if str(t).strip().casefold() not in ("system", "all team", "")]
+        for trader in unique_traders:
+            trader_df = df[df["Trader_Name"] == trader]
+            t_buys = trader_df.loc[trader_df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+            t_sells = trader_df.loc[trader_df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+            t_net = t_buys.sub(t_sells, fill_value=0.0)
+            t_holdings = {str(t): float(q) for t, q in t_net.items() if float(q) > 0}
+            
+            t_equity = 0.0
+            for t, q in t_holdings.items():
+                if t in live_prices:
+                    if t.upper().endswith(".T"):
+                        t_equity += q * live_prices[t]
+                    else:
+                        t_equity += q * live_prices[t] * usd_jpy
+                        
+            # Individual value = STARTING_CAPITAL + (Sum of their Trades JPY Impact + their Equity)
+            # This makes their graph comparable to the main fund's graph starting at 100M
+            t_profit = trader_df["Total_JPY_Impact"].sum() + t_equity
+            t_value = STARTING_JPY_BALANCE + t_profit
+            self.upsert_performance_row({"date": today, "Trader_Name": trader, "portfolio_value_jpy": f"{t_value:.2f}"})
 
         return {
             "date": today,

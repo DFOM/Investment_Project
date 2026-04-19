@@ -19,6 +19,7 @@ _DEFAULT_PRICE_FALLBACK: Final[float] = 0.0
 _DEFAULT_USDJPY_FALLBACK: Final[float] = 150.0
 FX_SPREAD_PERCENTAGE: Final[float] = 0.25
 _LAST_KNOWN_QUOTES: dict[str, float] = {}
+_COMPANY_NAME_CACHE: dict[str, str] = {}
 
 LOGGER = logging.getLogger(__name__)
 
@@ -129,6 +130,25 @@ def get_live_price(ticker: str, fallback: float | None = _DEFAULT_PRICE_FALLBACK
     except Exception as exc:
         LOGGER.warning("Price fetch failed for %s: %s", symbol, exc)
         return _resolve_fallback(symbol, fallback)
+
+
+def get_company_name(ticker: str) -> str:
+    """Fetch company name from yfinance; returns ticker symbol if unavailable."""
+    symbol = _normalize_ticker(ticker)
+    
+    # Check cache first
+    if symbol in _COMPANY_NAME_CACHE:
+        return _COMPANY_NAME_CACHE[symbol]
+    
+    try:
+        info = yf.Ticker(symbol).info
+        name = str(info.get("longName") or info.get("shortName") or symbol)
+        _COMPANY_NAME_CACHE[symbol] = name
+        return name
+    except Exception as exc:
+        LOGGER.warning("Company name fetch failed for %s: %s", symbol, exc)
+        _COMPANY_NAME_CACHE[symbol] = symbol
+        return symbol
 
 
 def get_current_usd_jpy(fallback: float | None = _DEFAULT_USDJPY_FALLBACK) -> float | None:

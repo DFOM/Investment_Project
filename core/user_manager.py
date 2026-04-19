@@ -7,8 +7,6 @@ from typing import Any
 
 from core.database import get_database, get_cached_team_auth_df, clear_data_cache
 
-_DEFAULT_MEMBERS = ["Hasan", "Syed", "Luq", "Richard"]
-
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -118,9 +116,6 @@ def authenticate_user(name: str, code: str) -> bool:
 
 
 def ensure_team_config() -> dict[str, Any]:
-    """Seed default members to the Google Sheet if it's empty."""
-    df = get_database().get_team_auth_df()
-    if df.empty:
-        for m in _DEFAULT_MEMBERS:
-            add_member(m)
+    """Ensure the Team Auth sheet exists by fetching it."""
+    get_cached_team_auth_df()
     return {}
