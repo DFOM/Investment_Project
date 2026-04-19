@@ -233,7 +233,11 @@ def main() -> None:
 
     # ── Calculate per-member metrics ───────────────────────────────────────────
     def _get_member_metrics(trader_name: str, ledger_df: pd.DataFrame, all_holdings: dict[str, float], usd_jpy_rate: float) -> dict:
-        """Calculate spending, earnings, ROI, and portfolio % for a specific member."""
+        """Calculate spending, earnings, ROI, and portfolio % for a specific member.
+        
+        IMPORTANT: Spending & portfolio value count ONLY currently-owned positions,
+        not historical/sold stocks.
+        """
         member_ledger = ledger_df[ledger_df["Trader_Name"] == trader_name]
         if member_ledger.empty:
             return {
@@ -245,14 +249,28 @@ def main() -> None:
                 "pct_of_total_earnings": 0.0,
             }
         
-        # Total JPY spent by this member (absolute value of BUY impacts)
-        total_spent = abs(float(member_ledger.loc[member_ledger["Action"] == "BUY", "Total_JPY_Impact"].sum()))
-        
-        # Calculate member's current holdings value
+        # Calculate member's current holdings (net after sells)
         member_buys = member_ledger[member_ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
         member_sells = member_ledger[member_ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
         member_net = member_buys.sub(member_sells, fill_value=0.0)
         
+        # Calculate spending ONLY for currently-held positions
+        total_spent = 0.0
+        for ticker in member_net.index:
+            net_qty = member_net[ticker]
+            if net_qty > 0:
+                # Get buy trades for this ticker
+                ticker_buys = member_ledger[(member_ledger["Action"] == "BUY") & (member_ledger["Ticker"] == ticker)]
+                if not ticker_buys.empty:
+                    total_cost_jpy = abs(float(ticker_buys["Total_JPY_Impact"].sum()))
+                    total_qty_bought = float(ticker_buys["Quantity"].sum())
+                    if total_qty_bought > 0:
+                        # Cost basis per share for this ticker
+                        avg_cost_per_share = total_cost_jpy / total_qty_bought
+                        # Spending = current holdings * average cost per share
+                        total_spent += net_qty * avg_cost_per_share
+        
+        # Calculate member's current equity value
         member_equity = 0.0
         for ticker, qty in member_net.items():
             if qty > 0 and ticker in all_holdings:
@@ -263,17 +281,28 @@ def main() -> None:
                     fx = 1.0 if is_jp else usd_jpy_rate
                     member_equity += qty * float(price) * fx
         
-        # Earnings = current equity value - amount spent
+        # Earnings = current equity value - amount spent (on current holdings)
         earnings = member_equity - total_spent
         
-        # ROI calculation (based on their spending)
+        # ROI calculation (based on their spending on current holdings)
         roi = (earnings / total_spent * 100.0) if total_spent > 0 else 0.0
         
-        # Calculate totals for percentage calculations
-        total_all_spent = abs(float(ledger_df.loc[ledger_df["Action"] == "BUY", "Total_JPY_Impact"].sum()))
+        # Calculate totals for percentage calculations (also only for current holdings)
         all_buys = ledger_df[ledger_df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
         all_sells = ledger_df[ledger_df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
         all_net = all_buys.sub(all_sells, fill_value=0.0)
+        
+        total_all_spent = 0.0
+        for ticker in all_net.index:
+            net_qty = all_net[ticker]
+            if net_qty > 0:
+                ticker_buys = ledger_df[(ledger_df["Action"] == "BUY") & (ledger_df["Ticker"] == ticker)]
+                if not ticker_buys.empty:
+                    total_cost_jpy = abs(float(ticker_buys["Total_JPY_Impact"].sum()))
+                    total_qty_bought = float(ticker_buys["Quantity"].sum())
+                    if total_qty_bought > 0:
+                        avg_cost_per_share = total_cost_jpy / total_qty_bought
+                        total_all_spent += net_qty * avg_cost_per_share
         
         total_equity = 0.0
         for ticker, qty in all_net.items():
@@ -291,7 +320,7 @@ def main() -> None:
         
         return {
             "total_spent": total_spent,
-            "current_value": member_equity + total_spent,  # equity + cash deployed
+            "current_value": member_equity,  # Only currently-held equity, not total_spent
             "earnings": earnings,
             "roi": roi,
             "pct_of_total_spent": pct_of_total_spent,
@@ -343,11 +372,6 @@ def main() -> None:
     if is_all:
         total = cash + equity_jpy
         roi = ((total - STARTING_JPY_BALANCE) / STARTING_JPY_BALANCE) * 100.0
-    else:
-        total_spent = abs(float(scoped.loc[scoped["Action"] == "BUY", "Total_JPY_Impact"].sum()))
-        total_profit = float(scoped["Total_JPY_Impact"].sum()) + equity_jpy
-        total = STARTING_JPY_BALANCE + total_profit
-        roi = (total_profit / total_spent * 100.0) if total_spent > 0 else 0.0
 
     # ── KPI metrics ────────────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
