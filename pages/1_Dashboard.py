@@ -232,14 +232,14 @@ def main() -> None:
         historical = _load_historical()
 
     # ── Calculate per-member metrics ───────────────────────────────────────────
-    def _get_member_metrics(trader_name: str, ledger_df: pd.DataFrame, all_holdings: dict[str, float], usd_jpy_rate: float) -> dict:
+    def _get_member_metrics(trader_name: str, member_ledger_df: pd.DataFrame, all_holdings: dict[str, float], usd_jpy_rate: float) -> dict:
         """Calculate spending, earnings, ROI, and portfolio % for a specific member.
         
         IMPORTANT: Spending & portfolio value count ONLY currently-owned positions,
-        not historical/sold stocks.
+        not historical/sold stocks. member_ledger_df should be pre-filtered to only
+        contain this member's trades.
         """
-        member_ledger = ledger_df[ledger_df["Trader_Name"] == trader_name]
-        if member_ledger.empty:
+        if member_ledger_df.empty:
             return {
                 "total_spent": 0.0,
                 "current_value": 0.0,
@@ -250,8 +250,8 @@ def main() -> None:
             }
         
         # Calculate member's current holdings (net after sells)
-        member_buys = member_ledger[member_ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
-        member_sells = member_ledger[member_ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+        member_buys = member_ledger_df[member_ledger_df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+        member_sells = member_ledger_df[member_ledger_df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
         member_net = member_buys.sub(member_sells, fill_value=0.0)
         
         # Calculate spending ONLY for currently-held positions
@@ -260,7 +260,7 @@ def main() -> None:
             net_qty = member_net[ticker]
             if net_qty > 0:
                 # Get buy trades for this ticker
-                ticker_buys = member_ledger[(member_ledger["Action"] == "BUY") & (member_ledger["Ticker"] == ticker)]
+                ticker_buys = member_ledger_df[(member_ledger_df["Action"] == "BUY") & (member_ledger_df["Ticker"] == ticker)]
                 if not ticker_buys.empty:
                     total_cost_jpy = abs(float(ticker_buys["Total_JPY_Impact"].sum()))
                     total_qty_bought = float(ticker_buys["Quantity"].sum())
@@ -287,16 +287,16 @@ def main() -> None:
         # ROI calculation (based on their spending on current holdings)
         roi = (earnings / total_spent * 100.0) if total_spent > 0 else 0.0
         
-        # Calculate totals for percentage calculations (also only for current holdings)
-        all_buys = ledger_df[ledger_df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
-        all_sells = ledger_df[ledger_df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+        # For percentage calculations, use full ledger to get team totals
+        all_buys = ledger[ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+        all_sells = ledger[ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
         all_net = all_buys.sub(all_sells, fill_value=0.0)
         
         total_all_spent = 0.0
         for ticker in all_net.index:
             net_qty = all_net[ticker]
             if net_qty > 0:
-                ticker_buys = ledger_df[(ledger_df["Action"] == "BUY") & (ledger_df["Ticker"] == ticker)]
+                ticker_buys = ledger[(ledger["Action"] == "BUY") & (ledger["Ticker"] == ticker)]
                 if not ticker_buys.empty:
                     total_cost_jpy = abs(float(ticker_buys["Total_JPY_Impact"].sum()))
                     total_qty_bought = float(ticker_buys["Quantity"].sum())
@@ -378,7 +378,7 @@ def main() -> None:
     
     # If a specific member is selected (not "All Team"), show ONLY that member's metrics
     if not is_all:
-        member_metrics = _get_member_metrics(selected, ledger, holdings, usd_jpy)
+        member_metrics = _get_member_metrics(selected, scoped, holdings, usd_jpy)
         m1.metric("Member Spent", format_currency(member_metrics["total_spent"], "JPY"), 
                  f"{member_metrics['pct_of_total_spent']:.1f}% of total")
         m2.metric("Member ROI", f"{member_metrics['roi']:+.2f}%")
