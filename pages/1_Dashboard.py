@@ -352,12 +352,8 @@ def main() -> None:
     # ── KPI metrics ────────────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
     
-    if view_mode == "Combined Portfolio" or is_all:
-        m1.metric("Total Portfolio Value", format_currency(total, "JPY"), help=f"Exact: \u00a5{total:,.2f}")
-        m2.metric("Overall ROI", f"{roi:+.2f}%")
-        m3.metric("Shared Cash Balance", format_currency(cash, "JPY"), help=f"Exact: \u00a5{cash:,.2f}")
-        m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
-    elif view_mode == "Specific Member":
+    # If a specific member is selected (not "All Team"), show ONLY that member's metrics
+    if not is_all:
         member_metrics = _get_member_metrics(selected, ledger, holdings, usd_jpy)
         m1.metric("Member Spent", format_currency(member_metrics["total_spent"], "JPY"), 
                  f"{member_metrics['pct_of_total_spent']:.1f}% of total")
@@ -365,6 +361,12 @@ def main() -> None:
         m3.metric("Member Earnings", format_currency(member_metrics["earnings"], "JPY"),
                  f"{member_metrics['pct_of_total_earnings']:+.1f}% of total")
         m4.metric("Member Portfolio Value", format_currency(member_metrics["current_value"], "JPY"))
+    elif view_mode == "Combined Portfolio":
+        # Show combined portfolio metrics only when "All Team" is selected
+        m1.metric("Total Portfolio Value", format_currency(total, "JPY"), help=f"Exact: \u00a5{total:,.2f}")
+        m2.metric("Overall ROI", f"{roi:+.2f}%")
+        m3.metric("Shared Cash Balance", format_currency(cash, "JPY"), help=f"Exact: \u00a5{cash:,.2f}")
+        m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
     elif view_mode == "Member Comparison":
         m1.metric("Total Portfolio Value", format_currency(total, "JPY"))
         m2.metric("Overall ROI", f"{roi:+.2f}%")
