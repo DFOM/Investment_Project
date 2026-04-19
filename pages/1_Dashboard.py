@@ -190,7 +190,7 @@ def main() -> None:
     # ── Sidebar controls ───────────────────────────────────────────────────────
     active_members = get_active_member_names()
     options = ["All Team"] + active_members
-    selected = st.sidebar.selectbox("View Analysis For", options, index=0)
+    selected = st.sidebar.selectbox("Select Member", options, index=0)
     
     # View mode selector
     view_mode = st.sidebar.radio(
@@ -232,8 +232,8 @@ def main() -> None:
         historical = _load_historical()
 
     # ── Calculate per-member metrics ───────────────────────────────────────────
-    def _get_member_metrics(trader_name: str, ledger_df: pd.DataFrame) -> dict:
-        """Calculate spending, earnings, and ROI for a specific member."""
+    def _get_member_metrics(trader_name: str, ledger_df: pd.DataFrame, all_holdings: dict[str, float], usd_jpy_rate: float) -> dict:
+        """Calculate spending, earnings, ROI, and portfolio % for a specific member."""
         member_ledger = ledger_df[ledger_df["Trader_Name"] == trader_name]
         if member_ledger.empty:
             return {
@@ -241,27 +241,61 @@ def main() -> None:
                 "current_value": 0.0,
                 "earnings": 0.0,
                 "roi": 0.0,
-                "cash": 0.0,
+                "pct_of_total_spent": 0.0,
+                "pct_of_total_earnings": 0.0,
             }
         
-        # Total spent (absolute value of negative impacts from buys)
+        # Total JPY spent by this member (absolute value of BUY impacts)
         total_spent = abs(float(member_ledger.loc[member_ledger["Action"] == "BUY", "Total_JPY_Impact"].sum()))
         
-        # Current value from latest balance
-        latest_balance = float(member_ledger["Remaining_JPY_Balance"].iloc[-1]) if not member_ledger.empty else 0.0
+        # Calculate member's current holdings value
+        member_buys = member_ledger[member_ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+        member_sells = member_ledger[member_ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+        member_net = member_buys.sub(member_sells, fill_value=0.0)
         
-        # Earnings = current balance - initial balance
-        earnings = latest_balance - STARTING_JPY_BALANCE
+        member_equity = 0.0
+        for ticker, qty in member_net.items():
+            if qty > 0 and ticker in all_holdings:
+                # Get live price
+                price = get_live_price(str(ticker), fallback=None)
+                if price is not None:
+                    is_jp = str(ticker).upper().endswith(".T")
+                    fx = 1.0 if is_jp else usd_jpy_rate
+                    member_equity += qty * float(price) * fx
         
-        # ROI calculation
+        # Earnings = current equity value - amount spent
+        earnings = member_equity - total_spent
+        
+        # ROI calculation (based on their spending)
         roi = (earnings / total_spent * 100.0) if total_spent > 0 else 0.0
+        
+        # Calculate totals for percentage calculations
+        total_all_spent = abs(float(ledger_df.loc[ledger_df["Action"] == "BUY", "Total_JPY_Impact"].sum()))
+        all_buys = ledger_df[ledger_df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+        all_sells = ledger_df[ledger_df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+        all_net = all_buys.sub(all_sells, fill_value=0.0)
+        
+        total_equity = 0.0
+        for ticker, qty in all_net.items():
+            if qty > 0 and ticker in all_holdings:
+                price = get_live_price(str(ticker), fallback=None)
+                if price is not None:
+                    is_jp = str(ticker).upper().endswith(".T")
+                    fx = 1.0 if is_jp else usd_jpy_rate
+                    total_equity += qty * float(price) * fx
+        
+        total_earnings = total_equity - total_all_spent
+        
+        pct_of_total_spent = (total_spent / total_all_spent * 100.0) if total_all_spent > 0 else 0.0
+        pct_of_total_earnings = (earnings / total_earnings * 100.0) if total_earnings > 0 else 0.0
         
         return {
             "total_spent": total_spent,
-            "current_value": latest_balance,
+            "current_value": member_equity + total_spent,  # equity + cash deployed
             "earnings": earnings,
             "roi": roi,
-            "cash": latest_balance,
+            "pct_of_total_spent": pct_of_total_spent,
+            "pct_of_total_earnings": pct_of_total_earnings,
         }
     
     is_all = selected == "All Team"
@@ -321,20 +355,20 @@ def main() -> None:
     if view_mode == "Combined Portfolio" or is_all:
         m1.metric("Total Portfolio Value", format_currency(total, "JPY"), help=f"Exact: \u00a5{total:,.2f}")
         m2.metric("Overall ROI", f"{roi:+.2f}%")
+        m3.metric("Shared Cash Balance", format_currency(cash, "JPY"), help=f"Exact: \u00a5{cash:,.2f}")
+        m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
     elif view_mode == "Specific Member":
-        member_metrics = _get_member_metrics(selected, ledger)
-        m1.metric("Member Portfolio Value", format_currency(member_metrics["current_value"], "JPY"))
+        member_metrics = _get_member_metrics(selected, ledger, holdings, usd_jpy)
+        m1.metric("Member Spent", format_currency(member_metrics["total_spent"], "JPY"), 
+                 f"{member_metrics['pct_of_total_spent']:.1f}% of total")
         m2.metric("Member ROI", f"{member_metrics['roi']:+.2f}%")
-        m3.metric("Total Spent", format_currency(member_metrics["total_spent"], "JPY"))
-        m4.metric("Earnings", format_currency(member_metrics["earnings"], "JPY"))
+        m3.metric("Member Earnings", format_currency(member_metrics["earnings"], "JPY"),
+                 f"{member_metrics['pct_of_total_earnings']:+.1f}% of total")
+        m4.metric("Member Portfolio Value", format_currency(member_metrics["current_value"], "JPY"))
     elif view_mode == "Member Comparison":
         m1.metric("Total Portfolio Value", format_currency(total, "JPY"))
         m2.metric("Overall ROI", f"{roi:+.2f}%")
         m3.metric("Members", f"{len(active_members)}")
-        m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
-    
-    if view_mode != "Specific Member":
-        m3.metric("Shared Cash Balance", format_currency(cash, "JPY"), help=f"Exact: \u00a5{cash:,.2f}")
         m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
 
     # ── Unrealized P&L table ───────────────────────────────────────────────────
@@ -560,14 +594,15 @@ def main() -> None:
         
         member_perf_data = []
         for member in active_members:
-            metrics = _get_member_metrics(member, ledger)
+            metrics = _get_member_metrics(member, ledger, holdings, usd_jpy)
             member_perf_data.append({
                 "Member": member,
-                "Portfolio Value (¥)": metrics["current_value"],
                 "Total Spent (¥)": metrics["total_spent"],
+                "% of Total Spent": metrics["pct_of_total_spent"],
                 "Earnings (¥)": metrics["earnings"],
+                "% of Total Earnings": metrics["pct_of_total_earnings"],
                 "ROI (%)": metrics["roi"],
-                "% of Capital": (metrics["earnings"] / metrics["total_spent"] * 100.0) if metrics["total_spent"] > 0 else 0.0,
+                "Portfolio Value (¥)": metrics["current_value"],
             })
         
         member_comp_df = pd.DataFrame(member_perf_data).sort_values("ROI (%)", ascending=False).reset_index(drop=True)
@@ -577,13 +612,14 @@ def main() -> None:
         
         styled_comp = (
             member_comp_df.style
-            .map(_color_roi, subset=["ROI (%)", "Earnings (¥)"])
+            .map(_color_roi, subset=["ROI (%)", "Earnings (¥)", "% of Total Earnings"])
             .format({
-                "Portfolio Value (¥)": "¥{:,.0f}",
                 "Total Spent (¥)": "¥{:,.0f}",
+                "% of Total Spent": "{:.1f}%",
                 "Earnings (¥)": "¥{:+,.0f}",
+                "% of Total Earnings": "{:+.1f}%",
                 "ROI (%)": "{:+.2f}%",
-                "% of Capital": "{:.2f}%",
+                "Portfolio Value (¥)": "¥{:,.0f}",
             })
             .bar(subset=["ROI (%)"], color="#4a90d9", vmin=min(0, member_comp_df["ROI (%)"].min()), vmax=member_comp_df["ROI (%)"].max())
         )
