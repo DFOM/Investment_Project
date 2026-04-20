@@ -14,10 +14,43 @@ from core.database import clear_data_cache, get_cached_ledger_df, get_database
 from core.market_data import get_executed_fx_quote, get_live_price
 from core.setup_env import STARTING_JPY_BALANCE
 
-FLAT_COMMISSION_JPY: Final[Decimal] = Decimal("500.00")
+# Rakuten Securities Commission Structure (from 2024)
+# TSE: 0.099% (minimum ¥99, maximum ¥487.50)
+# US: $1 per trade (~¥150 at 150 JPY/USD)
+RAKUTEN_TSE_COMMISSION_RATE: Final[Decimal] = Decimal("0.00099")  # 0.099%
+RAKUTEN_TSE_MIN_COMMISSION: Final[Decimal] = Decimal("99.00")
+RAKUTEN_TSE_MAX_COMMISSION: Final[Decimal] = Decimal("487.50")
+RAKUTEN_US_COMMISSION_USD: Final[Decimal] = Decimal("1.00")  # $1 per trade
 SLIPPAGE_MIN: Final[float] = -0.0005
 SLIPPAGE_MAX: Final[float] = 0.0005
 _TSE_DIGIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d{4}$")
+
+
+def calculate_commission(ticker: str, transaction_value_jpy: Decimal, fx_rate: Decimal | None = None) -> Decimal:
+    """Calculate Rakuten Securities commission based on ticker and transaction value.
+    
+    Args:
+        ticker: The ticker symbol (e.g., '1234.T' for TSE, 'AAPL' for US)
+        transaction_value_jpy: The notional value of the transaction in JPY
+        fx_rate: The USD/JPY exchange rate (only needed for US stocks)
+    
+    Returns:
+        The commission amount in JPY, rounded to 0.01
+    """
+    ticker_upper = ticker.upper().strip()
+    
+    if ticker_upper.endswith(".T"):
+        # TSE stock: percentage-based with min/max bounds
+        commission = transaction_value_jpy * RAKUTEN_TSE_COMMISSION_RATE
+        commission = max(commission, RAKUTEN_TSE_MIN_COMMISSION)
+        commission = min(commission, RAKUTEN_TSE_MAX_COMMISSION)
+        return _money(commission)
+    else:
+        # US stock: flat $1 per trade, convert to JPY
+        if fx_rate is None:
+            fx_rate = Decimal("150.00")  # Default fallback
+        commission_jpy = RAKUTEN_US_COMMISSION_USD * fx_rate
+        return _money(commission_jpy)
 
 
 def _d(value: float | int | str | Decimal) -> Decimal:
@@ -165,6 +198,7 @@ def execute_trade(
     auth_code: str = "",  # NEW: verify user code
 ) -> dict[str, float | str]:
     from core.user_manager import authenticate_user
+
     normalized_action = _normalize_action(action)
     symbol = _normalize_ticker(ticker)
 
@@ -228,10 +262,14 @@ def execute_trade(
 
     usd_notional_decimal = qty * local_asset_price
     gross_jpy_mid = usd_notional_decimal * live_mid_fx_rate
+    
+    # Calculate commission using Rakuten rates
+    commission_paid = calculate_commission(symbol, gross_jpy_mid, live_mid_fx_rate)
+    
     if normalized_action == "BUY":
-        total_jpy_impact = -(gross_jpy_mid + fx_conversion_fee_paid + FLAT_COMMISSION_JPY)
+        total_jpy_impact = -(gross_jpy_mid + fx_conversion_fee_paid + commission_paid)
     else:
-        total_jpy_impact = gross_jpy_mid - fx_conversion_fee_paid - FLAT_COMMISSION_JPY
+        total_jpy_impact = gross_jpy_mid - fx_conversion_fee_paid - commission_paid
 
     previous_balance = _d(_latest_balance())
 
@@ -264,7 +302,7 @@ def execute_trade(
         "Total_JPY_Impact": f"{_money(total_jpy_impact):f}",
         "Remaining_JPY_Balance": f"{_money(remaining_balance):f}",
         "Trader_Name": student,
-        "Commission_Paid": f"{_money(FLAT_COMMISSION_JPY):f}",
+        "Commission_Paid": f"{_money(commission_paid):f}",
         "FX_Conversion_Fee": f"{_money(fx_conversion_fee_paid):f}",
         "Trade_Rationale": rationale.strip(),  # NEW: 12th column
     }
@@ -287,7 +325,7 @@ def execute_trade(
         "slippage_pct": round(float(slippage_factor * Decimal("100")), 5),
         "live_mid_market_fx_rate": float(_qty(live_mid_fx_rate)),
         "executed_fx_rate": float(_qty(executed_fx_rate)),
-        "commission_paid": float(_money(FLAT_COMMISSION_JPY)),
+        "commission_paid": float(_money(commission_paid)),
         "fx_conversion_fee_paid": float(_money(fx_conversion_fee_paid)),
         "total_jpy_impact": float(_money(total_jpy_impact)),
         "remaining_jpy_balance": float(_money(remaining_balance)),

@@ -9,16 +9,13 @@ import streamlit as st
 from core.database import get_database
 from core.market_data import get_current_usd_jpy, get_executed_fx_quote, get_live_price, get_company_name
 from core.setup_env import setup_environment
-from core.trade_executor import execute_trade, get_cash_balance, queue_order, process_pending_orders, is_market_open, exchange_name
+from core.trade_executor import execute_trade, get_cash_balance, queue_order, process_pending_orders, is_market_open, exchange_name, calculate_commission
 from core.user_manager import ensure_team_config, get_active_member_names
+from decimal import Decimal
 
 SLIPPAGE_MIN = -0.0005
 SLIPPAGE_MAX = 0.0005
-FLAT_TRADING_COMMISSION_JPY = 500.0
 FX_SPREAD = 0.0025  # 0.25% broker spread on USD/JPY
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_jp_ticker(ticker: str) -> bool:
     return ticker.upper().endswith(".T")
@@ -114,7 +111,13 @@ def _shares_from_jpy(
     """Max shares purchasable from jpy_budget after commission and FX spread."""
     if price is None or price <= 0:
         return None
-    net_jpy = jpy_budget - FLAT_TRADING_COMMISSION_JPY
+    
+    # Estimate commission for calculation purposes
+    # For JSE: ~0.1% (conservative estimate of 0.099%)
+    # For US: ~¥150 (approximate $1 at 150 rate)
+    estimated_commission = 0.001 if is_jp else 150.0
+    net_jpy = jpy_budget - estimated_commission
+    
     if net_jpy <= 0:
         return 0.0
     if is_jp:
@@ -145,21 +148,6 @@ def _build_estimate(
     slipped_price = float(local_price_raw) * (1.0 + slippage_factor)
     asset_notional_local = quantity * slipped_price
 
-    base = {
-        "ticker": ticker,
-        "action": action,
-        "quantity": quantity,
-        "authorized_by": authorized_by,
-        "rationale": rationale,
-        "sizing_mode": sizing_mode,
-        "timing": timing,
-        "local_price": float(local_price_raw),
-        "slipped_local_price": slipped_price,
-        "slippage_pct": slippage_factor * 100.0,
-        "asset_notional_local": asset_notional_local,
-        "commission_paid": FLAT_TRADING_COMMISSION_JPY,
-    }
-
     if not is_jp:
         fx_quote = get_executed_fx_quote(action, usd_notional=asset_notional_local, fallback=None)
         if fx_quote is None:
@@ -168,10 +156,31 @@ def _build_estimate(
         live_mid = float(fx_quote["live_mid_market_rate"])
         exec_fx = float(fx_quote["executed_rate"])
         fx_fee = float(fx_quote["fx_fee_amount_jpy"])
+        
+        # Calculate commission based on transaction value in JPY
+        gross_jpy = asset_notional_local * live_mid
+        commission_paid = float(calculate_commission(ticker, Decimal(str(gross_jpy)), Decimal(str(live_mid))))
+        
         if action == "BUY":
-            jpy_impact = -(asset_notional_local * live_mid + fx_fee + FLAT_TRADING_COMMISSION_JPY)
+            jpy_impact = -(gross_jpy + fx_fee + commission_paid)
         else:
-            jpy_impact = asset_notional_local * live_mid - fx_fee - FLAT_TRADING_COMMISSION_JPY
+            jpy_impact = gross_jpy - fx_fee - commission_paid
+        
+        base = {
+            "ticker": ticker,
+            "action": action,
+            "quantity": quantity,
+            "authorized_by": authorized_by,
+            "rationale": rationale,
+            "sizing_mode": sizing_mode,
+            "timing": timing,
+            "local_price": float(local_price_raw),
+            "slipped_local_price": slipped_price,
+            "slippage_pct": slippage_factor * 100.0,
+            "asset_notional_local": asset_notional_local,
+            "commission_paid": commission_paid,
+        }
+        
         return {
             **base,
             "live_mid_market_fx_rate": live_mid,
@@ -181,10 +190,29 @@ def _build_estimate(
             "is_us_ticker": True,
         }
     else:
+        # JSE stock: calculate commission based on JPY notional
+        commission_paid = float(calculate_commission(ticker, Decimal(str(asset_notional_local))))
+        
         if action == "BUY":
-            jpy_impact = -(asset_notional_local + FLAT_TRADING_COMMISSION_JPY)
+            jpy_impact = -(asset_notional_local + commission_paid)
         else:
-            jpy_impact = asset_notional_local - FLAT_TRADING_COMMISSION_JPY
+            jpy_impact = asset_notional_local - commission_paid
+        
+        base = {
+            "ticker": ticker,
+            "action": action,
+            "quantity": quantity,
+            "authorized_by": authorized_by,
+            "rationale": rationale,
+            "sizing_mode": sizing_mode,
+            "timing": timing,
+            "local_price": float(local_price_raw),
+            "slipped_local_price": slipped_price,
+            "slippage_pct": slippage_factor * 100.0,
+            "asset_notional_local": asset_notional_local,
+            "commission_paid": commission_paid,
+        }
+        
         return {
             **base,
             "live_mid_market_fx_rate": 1.0,
@@ -338,7 +366,10 @@ def main() -> None:
             return 0.0, None
         price_local = sell_data.get("price", 0.0)
         fx = sell_data.get("fx", 1.0)
-        proceeds = max(0.0, qty * price_local * fx - FLAT_TRADING_COMMISSION_JPY)
+        gross_proceeds = qty * price_local * fx
+        # Estimate commission (0.1% for JSE, ¥150 for US)
+        est_commission = gross_proceeds * 0.001 if ticker and ticker.upper().endswith(".T") else 150.0
+        proceeds = max(0.0, gross_proceeds - est_commission)
         profit = (proceeds - qty * avg_cost_per_share) if avg_cost_per_share > 0 else None
         return proceeds, profit
 
@@ -395,7 +426,9 @@ def main() -> None:
             if preview_price and preview_price > 0:
                 fx_eff = 1.0 if is_jp else (preview_fx or 150.0) * (1.0 - FX_SPREAD)
                 denom = preview_price * (fx_eff if fx_eff > 0 else 1.0)
-                raw_shares = (jpy_target + FLAT_TRADING_COMMISSION_JPY) / denom if denom > 0 else 0.0
+                # Estimate commission for sizing calculation
+                est_commission = jpy_target * 0.001 if is_jp else 150.0
+                raw_shares = (jpy_target + est_commission) / denom if denom > 0 else 0.0
                 est_shares = min(raw_shares, held_qty) if held_qty > 0 else raw_shares
                 proceeds, profit = _proceeds_preview(est_shares)
                 pc1, pc2, pc3 = st.columns(3)

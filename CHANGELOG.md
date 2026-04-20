@@ -2,7 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.3.0] - 2026-04-20
+### Added
+- **Rakuten Securities Commission Integration**: Dynamic commission calculation based on transaction type:
+  - Japanese stocks (TSE): 0.099% per trade (minimum ¥99, maximum ¥487.50)
+  - US stocks: $1 per trade (~¥150 at current rates)
+  - New `calculate_commission()` function in `core/trade_executor.py` for accurate real-world fee modeling
+- **Transaction History Page** (`pages/6_Transaction_History.py`):
+  - Complete audit trail of all buy/sell transactions with timestamps
+  - Advanced filtering: by trader name, action (BUY/SELL), ticker symbol, and date range
+  - Transaction detail table with all trade information including rationale
+  - Summary statistics by trader and ticker
+  - Color-coded buy/sell actions for quick visual scanning
+- **Fixed Portfolio Value Graph**:
+  - Chart now shows only daily snapshots (one data point per date)
+  - Removed intraday trade data points that cluttered the visualization
+  - Graph properly starts from each member's first trade date when member is selected
+  - Added axis labels for clarity
+
+### Changed
+- Commission calculation now uses Rakuten Securities' real-world rates instead of flat ¥500 fee
+- Dashboard portfolio value chart filters historical data to show only daily data
+- Dashboard chart title updated to "Portfolio Value Over Time (Daily)" for clarity
+- Trading Desk preview estimates updated to use realistic commission approximations
+- Improved fallback message when no daily snapshots available
+
+### Fixed
+- Portfolio value graph now correctly filters by member's first trade date instead of team start date
+- Resolved issue where graph showed multiple data points per day (trades instead of daily snapshots)
+- Fixed member-specific graph filtering to exclude team starting balance baseline
+
 ## [v1.2.0] - 2026-04-19
+### Added
+- **Market-Aware Background Worker**: Enhanced `background_worker.py` with timezone-aware market hours detection for US (NYSE/NASDAQ: 9:30 AM - 4:00 PM ET) and Japanese (TSE: 9:00 AM - 3:00 PM JST) markets. Update frequency now automatically adjusts to every 10 minutes during market hours and 60 minutes outside market hours.
+- **Company Name Lookup**: New `get_company_name()` function in `core/market_data.py` that fetches and caches company names from yfinance for all tickers, with graceful fallbacks for API failures.
+- **Dashboard View Modes**: Three new dashboard view modes in `pages/1_Dashboard.py`:
+  - **Combined Portfolio**: Displays all team members' combined metrics and holdings
+  - **Member Comparison**: Shows performance comparison table ranking all members by ROI
+  - **Specific Member**: Detailed individual member metrics including total spent, earnings, and ROI
+- **Per-Member Performance Tracking**: New `_get_member_metrics()` function calculates for each member:
+  - Total capital spent on trades
+  - Current portfolio value
+  - Net earnings/losses
+  - Individual ROI percentage
+- **Enhanced Trading Desk**: 
+  - Company name display next to ticker symbol with exchange listing
+  - Improved pending orders display showing 🛒 (BUY) and 💰 (SELL) emojis
+  - Trader name and company name visible in order details
+  - Enhanced order labels with better formatting and readability
+- **Member Names in Holdings**: Added "Trader Name" column to open positions table when viewing all team members
+
+### Changed
+- Dashboard KPI metrics now dynamically update based on selected view mode
+- Trading Desk order book display significantly improved with company names and trader attribution
+- Background worker logging now includes market hours status and update interval information
+- Background worker wake-up interval reduced from 60 seconds to 30 seconds for faster response to market hour transitions
+
+### Performance
+- Company name results cached in memory to reduce API calls (1-hour implicit cache via yfinance)
+- Background worker now intelligently updates frequency based on actual market hours, reducing unnecessary processing
+
+## [v1.1.3] - 2026-04-15
 ### Added
 - **Market-Aware Background Worker**: Enhanced `background_worker.py` with timezone-aware market hours detection for US (NYSE/NASDAQ: 9:30 AM - 4:00 PM ET) and Japanese (TSE: 9:00 AM - 3:00 PM JST) markets. Update frequency now automatically adjusts to every 10 minutes during market hours and 60 minutes outside market hours.
 - **Company Name Lookup**: New `get_company_name()` function in `core/market_data.py` that fetches and caches company names from yfinance for all tickers, with graceful fallbacks for API failures.

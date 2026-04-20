@@ -1,12 +1,12 @@
 # Investment_Project
 
-**Version: v1.2.0** — Class project for investment course by Liu Ming
+**Version: v1.3.0** — Class project for investment course by Liu Ming
 
 ## Overview
 
 Stock Portfolio Simulator — An educational Streamlit application for team-based stock trading practice with real-time market data, portfolio tracking, and comprehensive performance analytics.
 
-## 🚀 Key Features (v1.2.0)
+## 🚀 Key Features (v1.3.0)
 
 ### Portfolio Management
 - **Combined Portfolio View**: See all team members' investments aggregated with individual member identification
@@ -44,7 +44,9 @@ Stock Portfolio Simulator — An educational Streamlit application for team-base
 
 ### Portfolio Mechanics
 - **Starting Balance**: ¥10,000,000 per member
-- **Commission**: ¥500 per trade
+- **Commission**: Rakuten Securities rates
+  - **TSE (Japanese stocks)**: 0.099% per trade (min ¥99, max ¥487.50)
+  - **US stocks**: $1 per trade (~¥150 at current rates)
 - **FX Conversion**: 0.25% broker spread on USD/JPY conversions
 - **Tax Simulation**: 
   - US Stocks: ~28.28% (10% US withholding + 20.315% Japan tax)
@@ -78,7 +80,8 @@ Stock Portfolio Simulator — An educational Streamlit application for team-base
     ├── 3_Admin_Panel.py             # Team management
     ├── 4_Portfolio_Deep_Dive.py     # Detailed position analysis
     ├── 4_Stock_Research.py          # Company fundamentals
-    └── 5_Dividends_Tax.py           # Dividend & tax center
+    ├── 5_Dividends_Tax.py           # Dividend & tax center
+    └── 6_Transaction_History.py     # Complete audit trail with filters & summaries
 ```
 
 ## 🔄 Update Schedule
@@ -88,7 +91,21 @@ Background worker automatically adjusts its update frequency based on market hou
 - **Outside Market Hours**: Every 60 minutes
 - **Daily**: Portfolio performance snapshots (once per UTC day)
 
-## 📊 Recent Updates (v1.2.0)
+## 📊 Recent Updates (v1.3.0)
+
+✅ **Rakuten Securities Commission Integration**: Dynamic commission calculation
+   - TSE: 0.099% (min ¥99, max ¥487.50)
+   - US Stocks: $1 per trade
+✅ **Fixed Portfolio Value Chart**: Daily snapshots only, no intraday trades
+✅ **Member-Scoped Charts**: Graphs start from each member's first trade date
+✅ **New Transaction History Page**: Complete audit trail with:
+   - Timestamp filtering by date range
+   - Trader and action (buy/sell) filtering
+   - Ticker filtering
+   - Transaction summary by trader and ticker
+   - Sortable transaction table with all details
+
+## 📊 Previous Updates (v1.2.0)
 
 ✅ Market-aware background worker with timezone detection
 ✅ Company name fetching and caching from yfinance
@@ -96,6 +113,5 @@ Background worker automatically adjusts its update frequency based on market hou
 ✅ Per-member performance metrics and analytics
 ✅ Enhanced trading desk with company names
 ✅ Improved pending orders display with trader attribution
-✅ Member-tagged holdings in combined portfolio view
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.

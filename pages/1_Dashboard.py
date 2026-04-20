@@ -454,25 +454,32 @@ def main() -> None:
         # Default to 'All Team' if the column is missing in older ledgers
         trader_col = historical.get("Trader_Name", pd.Series(["All Team"] * len(historical)))
         target_name = "All Team" if is_all else selected
-        hist_view = historical[trader_col == target_name]
+        hist_view = historical[trader_col == target_name].copy()
+        
+        # Ensure we only show daily data (one point per date)
+        if not hist_view.empty:
+            hist_view["date"] = pd.to_datetime(hist_view["date"])
+            # Group by date and keep the last value for each date (daily snapshot)
+            hist_view = hist_view.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+            
+            # If member-specific, filter to start from their first trade
+            if not is_all and not scoped.empty:
+                first_trade_date = pd.to_datetime(scoped["Timestamp"]).min().normalize()
+                hist_view = hist_view[hist_view["date"] >= first_trade_date]
 
     if not hist_view.empty:
         fig = px.line(
             hist_view, x="date", y="portfolio_value_jpy",
-            title="Portfolio Value Over Time", markers=True,
+            title="Portfolio Value Over Time (Daily)", markers=True,
         )
         fig.add_hline(y=STARTING_JPY_BALANCE, line_dash="dot", line_color="gray", annotation_text="Starting Capital")
+        fig.update_xaxes(title_text="Date")
+        fig.update_yaxes(title_text="Portfolio Value (¥)")
         st.plotly_chart(fig, use_container_width=True)
     elif scoped.empty:
         st.info("No data available for charting yet.")
     else:
-        # Fallback to building it from ledger growth if no snapshot exists yet
-        growth = scoped[["Timestamp", "Total_JPY_Impact"]].copy().sort_values("Timestamp")
-        growth["portfolio_value_jpy"] = STARTING_JPY_BALANCE + growth["Total_JPY_Impact"].cumsum()
-        fig = px.line(growth, x="Timestamp", y="portfolio_value_jpy",
-                      title="Portfolio Value Over Time (Estimated from trades)", markers=True)
-        fig.add_hline(y=STARTING_JPY_BALANCE, line_dash="dot", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
+        st.info("No daily snapshots recorded yet. Buy or sell shares to generate performance data.")
 
     # ── Allocation Analysis ────────────────────────────────────────────────────
     st.divider()
