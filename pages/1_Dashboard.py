@@ -101,7 +101,8 @@ def _net_holdings(ledger: pd.DataFrame) -> dict[str, float]:
     buys = ledger.loc[ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
     sells = ledger.loc[ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
     net = buys.sub(sells, fill_value=0.0)
-    return {str(t): float(q) for t, q in net.items() if float(q) > 0}
+    # Filter to only positions with meaningful quantity (> 0.0001 to handle floating point precision)
+    return {str(t): float(q) for t, q in net.items() if float(q) > 0.0001}
 
 
 def _weighted_avg_cost(ledger: pd.DataFrame) -> dict[str, float]:
@@ -258,7 +259,7 @@ def main() -> None:
         total_spent = 0.0
         for ticker in member_net.index:
             net_qty = member_net[ticker]
-            if net_qty > 0:
+            if net_qty > 0.0001:
                 # Get buy trades for this ticker
                 ticker_buys = member_ledger_df[(member_ledger_df["Action"] == "BUY") & (member_ledger_df["Ticker"] == ticker)]
                 if not ticker_buys.empty:
@@ -295,7 +296,7 @@ def main() -> None:
         total_all_spent = 0.0
         for ticker in all_net.index:
             net_qty = all_net[ticker]
-            if net_qty > 0:
+            if net_qty > 0.0001:
                 ticker_buys = ledger[(ledger["Action"] == "BUY") & (ledger["Ticker"] == ticker)]
                 if not ticker_buys.empty:
                     total_cost_jpy = abs(float(ticker_buys["Total_JPY_Impact"].sum()))
