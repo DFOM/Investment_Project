@@ -283,13 +283,16 @@ def run_backfill(dry_run: bool = False) -> dict[str, Any]:
                     else:
                         equity += qty * price * usd_jpy
             
-            # Get cash balance
-            if "Remaining_JPY_Balance" in trader_ledger.columns:
-                cash = float(trader_ledger["Remaining_JPY_Balance"].dropna().iloc[-1])
-            else:
-                cash = STARTING_JPY_BALANCE
+            # Calculate member's actual invested amount (not including initial capital)
+            # Net invested = Total BUY impact (negative) + Total SELL impact (positive)
+            # This gives us what they've actually put into the market
+            buys_impact = trader_ledger[trader_ledger["Action"] == "BUY"]["Total_JPY_Impact"].sum()
+            sells_impact = trader_ledger[trader_ledger["Action"] == "SELL"]["Total_JPY_Impact"].sum()
+            net_invested = abs(buys_impact) - abs(sells_impact) if pd.notna(buys_impact) else 0
             
-            total = cash + equity
+            # Member value = their net invested + current equity
+            # This tracks only their actual spending, not the shared initial capital
+            total = net_invested + equity
             
             results.append({
                 "date": d.isoformat(),
