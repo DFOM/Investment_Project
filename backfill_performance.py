@@ -44,6 +44,9 @@ def _load_ledger() -> pd.DataFrame:
         df = get_database().get_ledger_df()
         if not df.empty:
             print("Loaded ledger from Google Sheets")
+            # Parse timestamps - handle both string and datetime formats
+            if "Timestamp" in df.columns:
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
             return df
     except Exception as e:
         print(f"Google Sheets not available: {e}")
