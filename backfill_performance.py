@@ -187,13 +187,15 @@ def run_backfill(dry_run: bool = False) -> dict[str, Any]:
     for trader in traders:
         trader_trades = ledger[ledger["Trader_Name"] == trader]
         if not trader_trades.empty:
-            first_trade_dates[trader] = trader_trades["Timestamp"].min().date()
+            min_ts = trader_trades["Timestamp"].min()
+            if pd.notna(min_ts):
+                first_trade_dates[trader] = min_ts.date()
     
     print(f"First trade dates: {first_trade_dates}")
     
     # Determine date range
     today = date.today()
-    all_start_dates = list(first_trade_dates.values())
+    all_start_dates = [d for d in first_trade_dates.values() if pd.notna(d)]
     if not all_start_dates:
         print("No member trades found.")
         return {"status": "error", "message": "No member trades"}
@@ -249,7 +251,9 @@ def run_backfill(dry_run: bool = False) -> dict[str, Any]:
     
     for trader in traders:
         print(f"Processing {trader}...")
-        trader_start = first_trade_dates.get(trader, start_date)
+        trader_start = first_trade_dates.get(trader)
+        if trader_start is None:
+            continue  # Skip traders with no valid first trade date
         
         for d in trading_dates:
             if d < trader_start:
