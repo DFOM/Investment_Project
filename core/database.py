@@ -663,11 +663,18 @@ class GoogleSheetsDatabase:
                         t_equity += q * live_prices[t]
                     else:
                         t_equity += q * live_prices[t] * usd_jpy
-                        
-            # Individual value = STARTING_CAPITAL + (Sum of their Trades JPY Impact + their Equity)
-            # This makes their graph comparable to the main fund's graph starting at 100M
-            t_profit = trader_df["Total_JPY_Impact"].sum() + t_equity
-            t_value = STARTING_JPY_BALANCE + t_profit
+            
+            # Each member starts with 1/3 of the initial fund (33.33M)
+            # This represents equal allocation when team expanded
+            starting_allocation = STARTING_JPY_BALANCE / 3
+            
+            # Calculate member's net invested from their trades
+            t_buys_impact = trader_df[trader_df["Action"] == "BUY"]["Total_JPY_Impact"].sum()
+            t_sells_impact = trader_df[trader_df["Action"] == "SELL"]["Total_JPY_Impact"].sum()
+            t_net_invested = abs(t_buys_impact) - abs(t_sells_impact) if pd.notna(t_buys_impact) else 0
+            
+            # Member value = starting allocation + net invested + current equity
+            t_value = starting_allocation + t_net_invested + t_equity
             self.upsert_performance_row({"date": today, "Trader_Name": trader, "portfolio_value_jpy": f"{t_value:.2f}"})
 
         return {
