@@ -466,10 +466,10 @@ def main() -> None:
             # If member-specific, filter to start from their first trade
             if not is_all and not scoped.empty:
                 first_trade_ts = pd.to_datetime(scoped["Timestamp"]).min()
-                # Convert to datetime64[ns] for proper comparison
-                first_trade_date = pd.Timestamp(first_trade_ts).normalize().to_numpy()
+                # Convert to datetime64[ns] without timezone for proper comparison
+                first_trade_date = pd.Timestamp(first_trade_ts).normalize().tz_localize(None).to_numpy()
                 hist_view["date"] = pd.to_datetime(hist_view["date"]).dt.tz_localize(None)
-                hist_view = hist_view[hist_view["date"] >= first_trade_date]
+                hist_view = hist_view[hist_view["date"].values >= first_trade_date]
 
     if not hist_view.empty:
         fig = px.line(
