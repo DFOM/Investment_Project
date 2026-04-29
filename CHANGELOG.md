@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.0] - 2026-04-29
+### Added
+- **Margin Borrowing Centre** (`pages/7_Borrowing_Tab.py`):
+  - New page simulating Rakuten Securities margin trading (信用取引)
+  - Members can borrow up to 50% of their portfolio value
+  - Accurate Rakuten interest rates (2.80% standard, 2.28% preferential, 0.00% intraday)
+  - Stock rental fee tracking (1.10% per annum for short positions)
+  - Interest projection charts showing cumulative interest over time
+  - Margin requirement warnings (50% initial, 30% maintenance)
+  - Borrowing history stored in Google Sheets "Borrowing" worksheet
+- **Database Borrowing Functions**:
+  - `get_borrowing_history()` - retrieve member's borrowing history
+  - `record_borrowing()` - record new borrow transactions
+  - `record_repayment()` - record repayment transactions
+  - `calculate_accrued_interest()` - calculate daily accrued interest
+
 ## [v1.3.0] - 2026-04-20
 ### Added
 - **Rakuten Securities Commission Integration**: Dynamic commission calculation based on transaction type:

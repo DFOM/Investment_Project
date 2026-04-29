@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any, Final
 
@@ -582,6 +582,145 @@ class GoogleSheetsDatabase:
 
         return df
 
+    # ── Borrowing History ─────────────────────────────────────────────────────
+    BORROWING_WORKSHEET_NAME: Final[str] = "Borrowing"
+    BORROWING_COLUMNS: Final[list[str]] = [
+        "date",
+        "Trader_Name",
+        "borrowed_amount",
+        "repaid_amount",
+        "interest_paid",
+        "balance",
+        "interest_rate",
+    ]
+
+    def _get_borrowing_ws(self) -> Any:
+        """Get or create the Borrowing worksheet."""
+        self.ensure_schema()
+        spreadsheet = self._gc.open_by_key(self.spreadsheet_id)
+        try:
+            return spreadsheet.worksheet(self.BORROWING_WORKSHEET_NAME)
+        except Exception:
+            # Create if not exists
+            spreadsheet.add_worksheet(self.BORROWING_WORKSHEET_NAME, rows=1000, cols=10)
+            ws = spreadsheet.worksheet(self.BORROWING_WORKSHEET_NAME)
+            ws.update([self.BORROWING_COLUMNS], "A1")
+            return ws
+
+    def get_borrowing_history(self, trader_name: str) -> pd.DataFrame:
+        """Get borrowing history for a specific trader."""
+        try:
+            ws = self._get_borrowing_ws()
+            records = ws.get_all_records()
+            df = pd.DataFrame(records)
+            if df.empty:
+                return pd.DataFrame(columns=self.BORROWING_COLUMNS)
+            
+            # Filter by trader
+            if "Trader_Name" in df.columns:
+                df = df[df["Trader_Name"] == trader_name]
+            
+            # Parse numeric columns
+            for col in ["borrowed_amount", "repaid_amount", "interest_paid", "balance"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            
+            return df.sort_values("date", ascending=False)
+        except Exception:
+            return pd.DataFrame(columns=self.BORROWING_COLUMNS)
+
+    def record_borrowing(
+        self,
+        trader_name: str,
+        borrowed_amount: float,
+        interest_rate: float,
+    ) -> dict[str, Any]:
+        """Record a new borrowing transaction."""
+        ws = self._get_borrowing_ws()
+        
+        # Get current balance
+        history = self.get_borrowing_history(trader_name)
+        current_balance = float(history["balance"].sum()) if not history.empty and "balance" in history.columns else 0.0
+        
+        new_balance = current_balance + borrowed_amount
+        today = date.today().isoformat()
+        
+        row = [
+            today,
+            trader_name,
+            borrowed_amount,
+            0.0,  # repaid_amount
+            0.0,  # interest_paid (accrues daily)
+            new_balance,
+            interest_rate,
+        ]
+        
+        ws.append_row(row)
+        
+        return {
+            "status": "success",
+            "date": today,
+            "trader_name": trader_name,
+            "borrowed_amount": borrowed_amount,
+            "new_balance": new_balance,
+            "interest_rate": interest_rate,
+        }
+
+    def record_repayment(
+        self,
+        trader_name: str,
+        repaid_amount: float,
+    ) -> dict[str, Any]:
+        """Record a repayment transaction."""
+        ws = self._get_borrowing_ws()
+        
+        # Get current balance
+        history = self.get_borrowing_history(trader_name)
+        current_balance = float(history["balance"].sum()) if not history.empty and "balance" in history.columns else 0.0
+        
+        new_balance = max(0.0, current_balance - repaid_amount)
+        today = date.today().isoformat()
+        
+        row = [
+            today,
+            trader_name,
+            0.0,  # borrowed_amount
+            repaid_amount,
+            0.0,  # interest_paid
+            new_balance,
+            0.0,  # interest_rate (not changing)
+        ]
+        
+        ws.append_row(row)
+        
+        return {
+            "status": "success",
+            "date": today,
+            "trader_name": trader_name,
+            "repaid_amount": repaid_amount,
+            "new_balance": new_balance,
+        }
+
+    def calculate_accrued_interest(self, trader_name: str) -> float:
+        """Calculate accrued interest for a trader based on their borrowing balance."""
+        history = self.get_borrowing_history(trader_name)
+        if history.empty:
+            return 0.0
+        
+        total_interest = 0.0
+        for _, row in history.iterrows():
+            balance = float(row.get("balance", 0))
+            rate = float(row.get("interest_rate", 0))
+            if balance > 0 and rate > 0:
+                # Simple daily interest calculation
+                daily = (balance * rate) / 365
+                total_interest += daily
+        
+        return total_interest
+
     def get_recent_ledger_df(self, n: int = 5) -> pd.DataFrame:
         df = self.get_ledger_df()
         if df.empty:
@@ -712,6 +851,26 @@ def get_cached_performance_df() -> pd.DataFrame:
 def get_cached_team_auth_df() -> pd.DataFrame:
     """Return the Team Auth tab as a DataFrame."""
     return get_database().get_team_auth_df()
+
+
+def get_borrowing_history(trader_name: str) -> pd.DataFrame:
+    """Return borrowing history for a trader."""
+    return get_database().get_borrowing_history(trader_name)
+
+
+def record_borrowing(trader_name: str, borrowed_amount: float, interest_rate: float) -> dict[str, Any]:
+    """Record a new borrowing transaction."""
+    return get_database().record_borrowing(trader_name, borrowed_amount, interest_rate)
+
+
+def record_repayment(trader_name: str, repaid_amount: float) -> dict[str, Any]:
+    """Record a repayment transaction."""
+    return get_database().record_repayment(trader_name, repaid_amount)
+
+
+def calculate_accrued_interest(trader_name: str) -> float:
+    """Calculate accrued interest for a trader."""
+    return get_database().calculate_accrued_interest(trader_name)
 
 
 def clear_data_cache() -> None:
