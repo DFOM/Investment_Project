@@ -175,8 +175,8 @@ with st.expander("📊 Current Rakuten Margin Rates (April 2026)", expanded=Fals
 
 # Member selection
 trader_name = _member_selector()
-aliases = get_member_aliases()
-member_display = aliases.get(trader_name, trader_name)
+aliases = get_member_aliases(trader_name)
+member_display = aliases[0] if aliases else trader_name
 
 # Get portfolio value
 portfolio_value = _get_member_portfolio_value(trader_name)
