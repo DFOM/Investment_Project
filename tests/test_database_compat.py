@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -10,6 +12,25 @@ from core.db_postgres import PostgreSQLDatabase
 
 
 class DatabaseCompatibilityTests(unittest.TestCase):
+
+    def test_conflict_markers_are_absent_from_pr_hotspots(self) -> None:
+        hotspots = [
+            "core/database.py",
+            "core/db_postgres.py",
+            "pages/3_Admin_Panel.py",
+            "railway.json",
+            "tests/test_database_compat.py",
+        ]
+        conflict_marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
+
+        offenders = []
+        for hotspot in hotspots:
+            body = Path(hotspot).read_text(encoding="utf-8")
+            if conflict_marker.search(body):
+                offenders.append(hotspot)
+
+        self.assertEqual(offenders, [])
+
     def test_postgres_adapter_exposes_legacy_methods(self) -> None:
         required_methods = [
             "append_ledger_row",
