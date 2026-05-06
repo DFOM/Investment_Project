@@ -30,7 +30,7 @@ def _load_team_members() -> list[str]:
     return get_active_member_names()
 
 
-def _get_current_holdings() -> dict[str, float]:
+def _get_current_holdings(trader_name: str | None = None) -> dict[str, float]:
     """Return {ticker: net_quantity} for all positions with qty > 0, parsed from ledger."""
     import pandas as pd
     df = get_database().get_ledger_df()
@@ -44,6 +44,10 @@ def _get_current_holdings() -> dict[str, float]:
     df["Ticker"] = df["Ticker"].astype(str).str.strip().str.upper()
     df["Action"] = df["Action"].astype(str).str.strip().str.upper()
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+    if trader_name:
+        df = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
+        if df.empty:
+            return {}
     buys = df[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
     sells = df[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
     net = buys.sub(sells, fill_value=0.0)
@@ -70,7 +74,7 @@ def _enrich_holdings(holdings: dict[str, float], usd_jpy: float) -> dict[str, di
     return rows
 
 
-def _get_avg_cost_jpy_per_share(ticker: str) -> float:
+def _get_avg_cost_jpy_per_share(ticker: str, trader_name: str | None = None) -> float:
     """Average JPY cost per share for *ticker* from all BUY rows in the ledger."""
     try:
         df = get_database().get_ledger_df()
@@ -80,6 +84,8 @@ def _get_avg_cost_jpy_per_share(ticker: str) -> float:
         df["Action"] = df["Action"].astype(str).str.strip().str.upper()
         df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
         df["Total_JPY_Impact"] = pd.to_numeric(df["Total_JPY_Impact"], errors="coerce").fillna(0)
+        if trader_name:
+            df = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
         buys = df[(df["Ticker"] == ticker.upper().strip()) & (df["Action"] == "BUY")]
         total_qty = buys["Quantity"].sum()
         if total_qty <= 0:
@@ -247,6 +253,8 @@ def main() -> None:
     with col_action_top:
         action = st.radio("Action", ["Buy", "Sell"], horizontal=True)
 
+    selected_trader = authorized_by if authorized_by != "-- Select group member --" else None
+
     # Clear stale estimate whenever action changes (prevents old BUY firing as SELL)
     if st.session_state.get("_last_action") != action:
         st.session_state["trade_estimate"] = None
@@ -256,7 +264,11 @@ def main() -> None:
     holdings: dict[str, float] = {}
     enriched: dict[str, dict] = {}
     if action == "Sell":
-        holdings = _get_current_holdings()
+        if selected_trader is None:
+            st.info("Select a member to view only that member's sellable positions.")
+            holdings = {}
+        else:
+            holdings = _get_current_holdings(selected_trader)
         if holdings:
             usd_jpy_live = get_current_usd_jpy(fallback=150.0) or 150.0
             with st.spinner("Fetching live prices for your positions…"):
@@ -352,13 +364,13 @@ def main() -> None:
     preview_price: float | None = st.session_state.get("_preview_price")
     preview_fx: float | None = st.session_state.get("_preview_fx")
     is_jp = _is_jp_ticker(ticker) if ticker else True
-    cash_balance = get_cash_balance()
+    cash_balance = get_cash_balance(selected_trader) if selected_trader else 0.0
 
     # Sell-specific context ── enriched data + cost basis
     sell_data: dict = enriched.get(ticker, {}) if action == "Sell" and ticker else {}
     held_qty: float = sell_data.get("qty", 0.0)
     position_value_jpy: float = sell_data.get("value_jpy", 0.0)
-    avg_cost_per_share = _get_avg_cost_jpy_per_share(ticker) if action == "Sell" and ticker else 0.0
+    avg_cost_per_share = _get_avg_cost_jpy_per_share(ticker, selected_trader) if action == "Sell" and ticker else 0.0
 
     def _proceeds_preview(qty: float) -> tuple[float, float | None]:
         """(approx_proceeds_jpy, profit_jpy | None) for a sell of *qty* shares."""
@@ -563,7 +575,7 @@ def main() -> None:
 
         # ── SELL P&L SUMMARY ───────────────────────────────────────────────────
         if est.get("action") == "SELL":
-            avg_cost = _get_avg_cost_jpy_per_share(est["ticker"])
+            avg_cost = _get_avg_cost_jpy_per_share(est["ticker"], est.get("authorized_by"))
             proceeds_jpy = abs(est["total_jpy_impact"])
             sp1, sp2, sp3 = st.columns(3)
             sp1.metric("Sale Proceeds", f"¥{proceeds_jpy:,.0f}")
@@ -613,7 +625,7 @@ def main() -> None:
                             mode=_mode_map.get(est["sizing_mode"], "SHARES"),
                             value=f"{est['quantity']:.6f}",
                             rationale=est["rationale"],
-                                auth_code=auth_code,
+                            auth_code=auth_code,
                         )
                     except Exception as exc:
                         result = {"status": "error", "message": str(exc)}
@@ -623,18 +635,21 @@ def main() -> None:
                         f"{est['ticker']} will execute at next market open."
                     )
                     st.session_state["trade_estimate"] = None
+                    get_database.cache_clear()
+                    st.cache_data.clear()
+                    st.rerun()
                 else:
                     st.error(f"\u274c Queue failed: {result.get('message', 'Unknown error.')}")
             else:
                 with st.spinner("Submitting trade to Google Sheets\u2026"):
                     try:
                         result = execute_trade(
-                                action=est["action"],
-                                ticker=est["ticker"],
-                                quantity=est["quantity"],
-                                trader_name=est["authorized_by"],
-                                rationale=est["rationale"],
-                                auth_code=auth_code,
+                            action=est["action"],
+                            ticker=est["ticker"],
+                            quantity=est["quantity"],
+                            trader_name=est["authorized_by"],
+                            rationale=est["rationale"],
+                            auth_code=auth_code,
                         )
                     except Exception as exc:
                         result = {"status": "error", "message": str(exc)}
@@ -659,11 +674,13 @@ def main() -> None:
         ob_df = get_database().get_order_book_df()
         pending = pd.DataFrame(columns=ob_df.columns)
         if not ob_df.empty and "Status" in ob_df.columns:
-            pending = ob_df[ob_df["Status"] == "PENDING"].reset_index(drop=True)
+            normalized_status = ob_df["Status"].astype(str).str.strip().str.upper()
+            pending = ob_df[normalized_status.eq("PENDING")].reset_index(drop=True)
 
         if pending.empty:
             st.info("No pending orders.")
         else:
+            st.caption("Showing all queued orders for the team so pending orders are never hidden by the member selector.")
             exec_col, _ = st.columns([2, 3])
             with exec_col:
                 if st.button(

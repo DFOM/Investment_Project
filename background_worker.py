@@ -63,7 +63,10 @@ def run_daily():
     logging.info("Recording daily portfolio performance for all members...")
     try:
         snap = record_daily_performance()
-        logging.info(f"Snapshot successful: {snap['total_portfolio_value_jpy']} JPY")
+        if snap.get("success"):
+            logging.info(f"Snapshot successful: {snap['total_portfolio_value_jpy']} JPY")
+        else:
+            logging.error(f"Snapshot failed: {snap.get('error', 'unknown error')}")
     except Exception as e:
         logging.error(f"Error in daily task: {e}")
 
