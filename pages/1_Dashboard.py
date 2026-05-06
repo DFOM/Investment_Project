@@ -9,7 +9,9 @@ from core.database import (
     get_database,
     get_cached_ledger_df,
     get_cached_performance_df,
+    get_simulation_settings,
     record_daily_performance,
+    resolve_member_initial_allocations,
 )
 from core.market_data import get_current_usd_jpy, get_live_price
 from core.setup_env import STARTING_JPY_BALANCE, setup_environment
@@ -81,6 +83,55 @@ def _load_ledger() -> pd.DataFrame:
     return df.dropna(subset=["Timestamp"]).sort_values("Timestamp")
 
 
+def _load_pending_orders() -> pd.DataFrame:
+    """Return normalized pending order rows for portfolio previews."""
+    try:
+        orders = get_database().get_order_book_df().copy()
+    except Exception:
+        return pd.DataFrame()
+    if orders.empty or "Status" not in orders.columns:
+        return pd.DataFrame()
+    orders["Status"] = orders["Status"].astype(str).str.strip().str.upper()
+    if "Action" not in orders.columns:
+        orders["Action"] = ""
+    if "Ticker" not in orders.columns:
+        orders["Ticker"] = ""
+    if "Value" not in orders.columns:
+        orders["Value"] = 0
+    orders["Action"] = orders["Action"].astype(str).str.strip().str.upper()
+    orders["Ticker"] = orders["Ticker"].astype(str).str.strip().str.upper()
+    orders["Value"] = pd.to_numeric(orders["Value"], errors="coerce").fillna(0.0)
+    if "Trader_Name" in orders.columns:
+        orders["Trader_Name"] = orders["Trader_Name"].astype(str).str.strip()
+    return orders[orders["Status"].eq("PENDING")].reset_index(drop=True)
+
+
+def _pending_buy_value_jpy(pending_orders: pd.DataFrame, usd_jpy: float) -> tuple[float, int, list[str]]:
+    """Estimate notional value of pending BUY orders without deducting cash yet."""
+    if pending_orders.empty:
+        return 0.0, 0, []
+
+    pending_buys = pending_orders[pending_orders["Action"].eq("BUY")].copy()
+    if pending_buys.empty:
+        return 0.0, 0, []
+
+    total_value = 0.0
+    skipped: list[str] = []
+    for _, order in pending_buys.iterrows():
+        ticker = str(order.get("Ticker", "")).strip().upper()
+        quantity = float(order.get("Value", 0.0) or 0.0)
+        if not ticker or quantity <= 0:
+            continue
+        price = get_live_price(ticker, fallback=None)
+        if price is None:
+            skipped.append(ticker)
+            continue
+        fx = 1.0 if _is_jp_ticker(ticker) else usd_jpy
+        total_value += quantity * float(price) * fx
+
+    return total_value, len(pending_buys), skipped
+
+
 def _load_historical() -> pd.DataFrame:
     out = get_cached_performance_df().copy()
     if out.empty:
@@ -117,6 +168,29 @@ def _weighted_avg_cost(ledger: pd.DataFrame) -> dict[str, float]:
         wac[str(ticker)] = float(total_cost / total_qty) if total_qty > 0 else 0.0
     return wac
 
+
+def _latest_cash_for_scope(ledger: pd.DataFrame, scoped: pd.DataFrame, is_all: bool) -> float:
+    settings = get_simulation_settings()
+    if ledger.empty:
+        return float(settings["total_starting_capital_jpy"]) if is_all else 0.0
+    source = ledger if is_all else scoped
+    if source.empty or "Remaining_JPY_Balance" not in source.columns:
+        return 0.0
+    latest = (
+        source.dropna(subset=["Remaining_JPY_Balance"])
+        .sort_values("Timestamp")
+        .groupby("Trader_Name")["Remaining_JPY_Balance"]
+        .last()
+    )
+    return float(latest.sum()) if not latest.empty else 0.0
+
+
+def _starting_capital_for_selection(selected_member: str, is_all: bool) -> float:
+    settings = get_simulation_settings()
+    if is_all:
+        return float(settings["total_starting_capital_jpy"])
+    allocations = resolve_member_initial_allocations(settings["total_starting_capital_jpy"])
+    return float(allocations.get(selected_member, 0.0))
 
 def _is_jp_ticker(ticker: str) -> bool:
     return ticker.upper().endswith(".T")
@@ -343,11 +417,16 @@ def main() -> None:
     # ── Live FX rate ───────────────────────────────────────────────────────────
     usd_jpy = get_current_usd_jpy(fallback=150.0) or 150.0
 
+    # ── Pending order preview ─────────────────────────────────────────────────
+    pending_orders = _load_pending_orders()
+    if not is_all and not pending_orders.empty and "Trader_Name" in pending_orders.columns:
+        aliases = set(get_member_aliases(selected))
+        pending_orders = pending_orders[pending_orders["Trader_Name"].isin(aliases)].reset_index(drop=True)
+    pending_buy_value, pending_order_count, pending_skipped = _pending_buy_value_jpy(pending_orders, usd_jpy)
+
     # ── Cash balance ───────────────────────────────────────────────────────────
-    if ledger.empty:
-        cash = float(STARTING_JPY_BALANCE)
-    else:
-        cash = float(ledger["Remaining_JPY_Balance"].dropna().iloc[-1])
+    cash = _latest_cash_for_scope(ledger, scoped, is_all)
+    starting_capital = _starting_capital_for_selection(selected, is_all)
 
     # ── Live holdings sync ─────────────────────────────────────────────────────
     holdings = _net_holdings(scoped)
@@ -370,9 +449,12 @@ def main() -> None:
 
     equity_jpy = float(positions_df["Market Value (JPY)"].sum()) if not positions_df.empty else 0.0
     
+    # Pending BUY orders are displayed as queued/reserved notional, not added
+    # to total value, because the same yen still exists as cash until execution.
+    total = cash + equity_jpy
+    deployable_cash = max(0.0, cash - pending_buy_value)
     if is_all:
-        total = cash + equity_jpy
-        roi = ((total - STARTING_JPY_BALANCE) / STARTING_JPY_BALANCE) * 100.0
+        roi = ((total - starting_capital) / starting_capital) * 100.0 if starting_capital else 0.0
 
     # ── KPI metrics ────────────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
@@ -385,18 +467,41 @@ def main() -> None:
         m2.metric("Member ROI", f"{member_metrics['roi']:+.2f}%")
         m3.metric("Member Earnings", format_currency(member_metrics["earnings"], "JPY"),
                  f"{member_metrics['pct_of_total_earnings']:+.1f}% of total")
-        m4.metric("Member Portfolio Value", format_currency(member_metrics["current_value"], "JPY"))
+        member_portfolio_value = cash + member_metrics["current_value"]
+        m4.metric(
+            "Member Portfolio Value",
+            format_currency(member_portfolio_value, "JPY"),
+            delta=f"{format_currency(pending_buy_value, 'JPY')} queued" if pending_buy_value else None,
+            delta_color="off",
+        )
     elif view_mode == "Combined Portfolio":
         # Show combined portfolio metrics only when "All Team" is selected
         m1.metric("Total Portfolio Value", format_currency(total, "JPY"), help=f"Exact: \u00a5{total:,.2f}")
         m2.metric("Overall ROI", f"{roi:+.2f}%")
-        m3.metric("Shared Cash Balance", format_currency(cash, "JPY"), help=f"Exact: \u00a5{cash:,.2f}")
+        m3.metric(
+            "Shared Cash Balance",
+            format_currency(cash, "JPY"),
+            delta=f"{format_currency(pending_buy_value, 'JPY')} queued" if pending_buy_value else None,
+            delta_color="off",
+            help=f"Exact: ¥{cash:,.2f}. Deployable after queued BUY orders: ¥{deployable_cash:,.2f}",
+        )
         m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
     elif view_mode == "Member Comparison":
         m1.metric("Total Portfolio Value", format_currency(total, "JPY"))
         m2.metric("Overall ROI", f"{roi:+.2f}%")
         m3.metric("Members", f"{len(active_members)}")
         m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
+
+    if pending_order_count:
+        st.caption(
+            f"Pending BUY orders total an estimated {format_currency(pending_buy_value, 'JPY')} "
+            "and are shown as queued/reserved notional only; they are not added to Total Portfolio Value "
+            "because the same yen is still included in cash until execution."
+        )
+    if pending_skipped:
+        st.warning(
+            "Could not price pending order(s): " + ", ".join(sorted(set(pending_skipped)))
+        )
 
     # ── Unrealized P&L table ───────────────────────────────────────────────────
     st.divider()
@@ -476,7 +581,7 @@ def main() -> None:
             hist_view, x="date", y="portfolio_value_jpy",
             title="Portfolio Value Over Time (Daily)", markers=True,
         )
-        fig.add_hline(y=STARTING_JPY_BALANCE, line_dash="dot", line_color="gray", annotation_text="Starting Capital")
+        fig.add_hline(y=starting_capital, line_dash="dot", line_color="gray", annotation_text="Starting Capital")
         fig.update_xaxes(title_text="Date")
         fig.update_yaxes(title_text="Portfolio Value (¥)")
         st.plotly_chart(fig, use_container_width=True)
