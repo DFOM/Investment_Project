@@ -200,13 +200,17 @@ class PostgreSQLDatabase:
                 ticker VARCHAR(50),
                 action VARCHAR(50),
                 mode VARCHAR(50),
-                value DECIMAL(18, 2),
+                value DECIMAL(18, 8),
                 rationale TEXT,
                 status VARCHAR(50),
                 trader_name VARCHAR(255),
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             )
+        """)
+        self.execute_update("""
+            ALTER TABLE order_book
+            ALTER COLUMN value TYPE DECIMAL(18, 8)
         """)
         
         self.execute_update("""
@@ -215,8 +219,13 @@ class PostgreSQLDatabase:
                 trader_name VARCHAR(255) UNIQUE,
                 auth_code VARCHAR(255),
                 active BOOLEAN DEFAULT TRUE,
+                initial_allocation_jpy DECIMAL(18, 2),
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             )
+        """)
+        self.execute_update("""
+            ALTER TABLE team_auth
+            ADD COLUMN IF NOT EXISTS initial_allocation_jpy DECIMAL(18, 2)
         """)
         
         self.execute_update("""
@@ -243,6 +252,215 @@ class PostgreSQLDatabase:
         """)
         
         logger.info("✅ Database schema verified/created")
+
+
+    def get_ledger_df(self):
+        """Return ledger rows using the legacy column names expected by pages."""
+        import pandas as pd
+
+        results = self.execute_query("SELECT * FROM ledger ORDER BY timestamp, id")
+        columns = [
+            "ID", "Timestamp", "Ticker", "Action", "Quantity", "Local_Asset_Price",
+            "Executed_FX_Rate", "Total_JPY_Impact", "Remaining_JPY_Balance",
+            "Trader_Name", "Commission_Paid", "FX_Conversion_Fee", "Trade_Rationale",
+            "Created_At",
+        ]
+        if not results:
+            return pd.DataFrame(columns=columns)
+
+        df = pd.DataFrame([dict(row) for row in results])
+        renamed = df.rename(columns={
+            "id": "ID",
+            "timestamp": "Timestamp",
+            "ticker": "Ticker",
+            "action": "Action",
+            "quantity": "Quantity",
+            "local_asset_price": "Local_Asset_Price",
+            "executed_fx_rate": "Executed_FX_Rate",
+            "total_jpy_impact": "Total_JPY_Impact",
+            "remaining_jpy_balance": "Remaining_JPY_Balance",
+            "trader_name": "Trader_Name",
+            "commission_paid": "Commission_Paid",
+            "fx_conversion_fee_paid": "FX_Conversion_Fee",
+            "trade_rationale": "Trade_Rationale",
+            "created_at": "Created_At",
+        })
+        return renamed
+
+    def get_recent_ledger_df(self, n: int = 5):
+        """Return the most recent ledger rows using legacy column names."""
+        df = self.get_ledger_df()
+        if df.empty:
+            return df
+        return df.tail(max(int(n), 1))
+
+    def cancel_order(self, timestamp: str) -> bool:
+        """Cancel a pending order by queued timestamp."""
+        affected = self.execute_update(
+            """
+            UPDATE order_book
+            SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP
+            WHERE timestamp = %s AND UPPER(TRIM(status)) = 'PENDING'
+            """,
+            (timestamp,),
+        )
+        return affected > 0
+
+    def append_ledger_row(self, row: dict[str, Any]) -> None:
+        """Append a legacy Ledger-style row to the PostgreSQL ledger table."""
+        self.execute_update("""
+            INSERT INTO ledger (timestamp, ticker, action, quantity, local_asset_price,
+                executed_fx_rate, total_jpy_impact, remaining_jpy_balance,
+                trader_name, commission_paid, fx_conversion_fee_paid, trade_rationale)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row.get("Timestamp"),
+                row.get("Ticker"),
+                row.get("Action"),
+                row.get("Quantity", 0),
+                row.get("Local_Asset_Price", 0),
+                row.get("Executed_FX_Rate", 1),
+                row.get("Total_JPY_Impact", 0),
+                row.get("Remaining_JPY_Balance", 0),
+                row.get("Trader_Name", ""),
+                row.get("Commission_Paid", 0),
+                row.get("FX_Conversion_Fee", row.get("FX_Conversion_Fee_Paid", 0)),
+                row.get("Trade_Rationale", ""),
+            ))
+
+    def append_order_book_row(self, row: dict[str, Any]) -> None:
+        """Append a legacy Order_Book-style row to the PostgreSQL order book."""
+        self.execute_update("""
+            INSERT INTO order_book (timestamp, ticker, action, mode, value, rationale, status, trader_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row.get("Timestamp"),
+                row.get("Ticker"),
+                row.get("Action"),
+                row.get("Mode"),
+                row.get("Value", 0),
+                row.get("Rationale", ""),
+                row.get("Status", "PENDING"),
+                row.get("Trader_Name", ""),
+            ))
+
+    def get_order_book_df(self):
+        """Return the order book using the legacy column names expected by the UI."""
+        import pandas as pd
+
+        results = self.execute_query("SELECT * FROM order_book ORDER BY timestamp, id")
+        if not results:
+            return pd.DataFrame(columns=[
+                "ID", "Timestamp", "Ticker", "Action", "Mode", "Value",
+                "Rationale", "Status", "Trader_Name", "Created_At", "Updated_At",
+            ])
+
+        df = pd.DataFrame([dict(row) for row in results])
+        renamed = df.rename(columns={
+            "id": "ID",
+            "timestamp": "Timestamp",
+            "ticker": "Ticker",
+            "action": "Action",
+            "mode": "Mode",
+            "value": "Value",
+            "rationale": "Rationale",
+            "status": "Status",
+            "trader_name": "Trader_Name",
+            "created_at": "Created_At",
+            "updated_at": "Updated_At",
+        })
+        if "Status" in renamed.columns:
+            renamed["Status"] = renamed["Status"].astype(str).str.strip().str.upper()
+        if "Action" in renamed.columns:
+            renamed["Action"] = renamed["Action"].astype(str).str.strip().str.upper()
+        if "Ticker" in renamed.columns:
+            renamed["Ticker"] = renamed["Ticker"].astype(str).str.strip().str.upper()
+        return renamed
+
+    def update_order_status(self, order_id_or_timestamp: Any, status: str) -> bool:
+        """Update an order by numeric id when available, otherwise by timestamp."""
+        if isinstance(order_id_or_timestamp, int) or str(order_id_or_timestamp).isdigit():
+            affected = self.execute_update(
+                "UPDATE order_book SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (status, int(order_id_or_timestamp)),
+            )
+        else:
+            affected = self.execute_update(
+                "UPDATE order_book SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE timestamp = %s",
+                (status, order_id_or_timestamp),
+            )
+        return affected > 0
+
+    def upsert_team_auth(
+        self,
+        trader_name: str,
+        auth_code: str,
+        active: bool = True,
+        initial_allocation_jpy: float | None = None,
+    ) -> None:
+        """Insert or update a team member authentication row."""
+        self.execute_update("""
+            INSERT INTO team_auth (trader_name, auth_code, active, initial_allocation_jpy)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (trader_name)
+            DO UPDATE SET
+                auth_code = EXCLUDED.auth_code,
+                active = EXCLUDED.active,
+                initial_allocation_jpy = COALESCE(
+                    EXCLUDED.initial_allocation_jpy,
+                    team_auth.initial_allocation_jpy
+                )
+            """, (trader_name, auth_code, active, initial_allocation_jpy))
+
+    def set_member_allocation(self, trader_name: str, allocation_jpy: float | None) -> bool:
+        """Set the starting-capital allocation for a team member."""
+        affected = self.execute_update(
+            "UPDATE team_auth SET initial_allocation_jpy = %s WHERE LOWER(trader_name) = LOWER(%s)",
+            (allocation_jpy, trader_name),
+        )
+        return affected > 0
+
+
+    def update_auth_code(self, trader_name: str, new_auth_code: str) -> bool:
+        """Update a team member's authentication code."""
+        affected = self.execute_update(
+            "UPDATE team_auth SET auth_code = %s WHERE LOWER(trader_name) = LOWER(%s)",
+            (new_auth_code, trader_name),
+        )
+        return affected > 0
+
+    def get_config_value(self, key: str) -> str | None:
+        """Fetch a raw config value from session_config."""
+        rows = self.execute_query("SELECT value FROM session_config WHERE key = %s", (key,))
+        if not rows:
+            return None
+        return rows[0][0]
+
+    def set_config_value(self, key: str, value: str) -> None:
+        """Upsert a raw config value into session_config."""
+        self.execute_update("""
+            INSERT INTO session_config (key, value, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (key)
+            DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+            """, (key, value))
+
+    def rename_team_auth(self, old_name: str, new_name: str) -> bool:
+        """Rename a team member in the auth table."""
+        affected = self.execute_update(
+            "UPDATE team_auth SET trader_name = %s WHERE LOWER(trader_name) = LOWER(%s)",
+            (new_name, old_name),
+        )
+        return affected > 0
+
+    def initialize_and_format_worksheets(self) -> dict[str, Any]:
+        """Backward-compatible no-op for old Google Sheets admin action."""
+        self.ensure_schema()
+        return {
+            "ledger_header_columns": 12,
+            "performance_header_columns": 3,
+            "genesis_row_written": False,
+        }
 
 
 _db: Optional[PostgreSQLDatabase] = None

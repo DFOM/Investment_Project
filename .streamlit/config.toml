@@ -1,9 +1,11 @@
 [client]
 showErrorDetails = true
-logger.level = "info"
 
 [logger]
 level = "info"
+
+[browser]
+gatherUsageStats = false
 
 [server]
 headless = true
