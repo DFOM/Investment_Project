@@ -1,6 +1,22 @@
-streamlit
-pandas
-plotly
-yfinance
-gspread
-google-auth
+# Core Framework
+streamlit>=1.35.0
+
+# Data Processing
+pandas>=2.2.0
+plotly>=5.18.0
+
+# Market Data
+yfinance>=0.2.40
+
+# Database
+psycopg2-binary>=2.9.0
+SQLAlchemy>=2.0.0  # Optional: ORM layer if needed
+
+# Utilities
+python-dotenv>=1.0.0
+pytz>=2024.1
+requests>=2.31.0
+
+# For CSV export/import
+openpyxl>=3.1.0  # Keeping for template reading
+

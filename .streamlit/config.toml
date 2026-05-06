@@ -1,0 +1,11 @@
+[client]
+showErrorDetails = true
+logger.level = "info"
+
+[logger]
+level = "info"
+
+[server]
+headless = true
+port = 8501
+address = "0.0.0.0"
