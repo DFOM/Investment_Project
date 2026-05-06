@@ -30,17 +30,27 @@ Railway automatically provisions PostgreSQL!
 
 1. Click "New" → "GitHub Repo"
 2. Select your forked repository
-3. Set Environment Variables:
-
-```
-STREAMLIT_SERVER_HEADLESS=true
-STREAMLIT_SERVER_PORT=8501
-STREAMLIT_SERVER_ADDRESS=0.0.0.0
-```
-
+3. Railway will read `railway.json`, build with `pip install -r requirements.txt`, and run `bash start.sh`.
 4. Click Deploy
 
+`start.sh` initializes the PostgreSQL schema, starts the daily background worker, and then starts Streamlit on Railway's `$PORT`.
+
 **Your app will be live in 2-3 minutes!** 🎉
+
+## ⏰ Daily Price Updates
+
+The Railway start command runs both processes in one service:
+
+```bash
+bash start.sh
+```
+
+`start.sh` starts `background_worker.py` before Streamlit. The worker:
+- executes queued orders every 10 minutes during US/JP market hours and every 60 minutes off-hours;
+- records one daily UTC portfolio snapshot using live yfinance prices and USD/JPY FX;
+- writes the snapshot into the PostgreSQL `performance` table for dashboard history and reports.
+
+If Railway restarts the service, the worker runs again and records at most one snapshot per UTC date because the performance table upserts on `(date, trader_name)`.
 
 ---
 
@@ -48,10 +58,13 @@ STREAMLIT_SERVER_ADDRESS=0.0.0.0
 
 Railway automatically sets:
 - `DATABASE_URL` (from PostgreSQL plugin)
+- `PORT` (for the public web service)
 
-You set manually:
-- `STREAMLIT_SERVER_HEADLESS=true`
-- `STREAMLIT_SERVER_ADDRESS=0.0.0.0`
+Optional manual variables:
+- `POSTGRES_URL` if you are not using Railway's `DATABASE_URL`
+- `TZ=UTC` if you want logs and daily snapshot checks to stay explicitly UTC
+
+No manual Streamlit port variables are required because `start.sh` passes Railway's `$PORT` to Streamlit.
 
 ---
 
@@ -75,8 +88,9 @@ The export matches your professor's template exactly:
 
 1. **Admin Panel** → "👤 Add Team Member"
 2. Enter names: Alice, Bob, Charlie
-3. Each gets ¥10,000,000 starting capital
-4. Each gets individual portfolio
+3. Configure total class capital and per-member allocations in **Admin Panel → Class Simulation Settings / Starting Capital Allocation**
+4. Click **Start New Simulation** to write each member's initial JPY funding row
+5. Each member receives their own auth code and portfolio balance
 
 ---
 
@@ -88,9 +102,9 @@ The export matches your professor's template exactly:
 - Wait: 30 seconds for initialization
 
 ### "Streamlit connection refused"
-- Check: STREAMLIT_SERVER_ADDRESS=0.0.0.0
-- Check: STREAMLIT_SERVER_HEADLESS=true
-- Port: 8501 (default)
+- Check: `railway.json` start command is `bash start.sh`
+- Check: Railway provides the `PORT` variable
+- Check deploy logs for the schema initialization message before Streamlit starts
 
 ### "No trades showing"
 - Execute a test trade first

@@ -100,21 +100,46 @@ def _load_ledger() -> pd.DataFrame:
     return df
 
 
-def _latest_balance() -> float:
+def _latest_balance(trader_name: str | None = None) -> float:
     df = _load_ledger()
     if df.empty:
         return STARTING_JPY_BALANCE
 
-    value = df["Remaining_JPY_Balance"].dropna()
-    if value.empty:
-        return STARTING_JPY_BALANCE
-    return float(value.iloc[-1])
+    if trader_name:
+        scoped = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
+        value = scoped["Remaining_JPY_Balance"].dropna()
+        if not value.empty:
+            return float(value.iloc[-1])
+        from core.database import resolve_member_initial_allocations
+        try:
+            allocations = resolve_member_initial_allocations()
+            for name, allocation in allocations.items():
+                if name.casefold() == trader_name.strip().casefold():
+                    return float(allocation)
+        except Exception:
+            pass
+
+    latest_by_trader = (
+        df.dropna(subset=["Remaining_JPY_Balance"])
+        .sort_values("Timestamp")
+        .groupby("Trader_Name")["Remaining_JPY_Balance"]
+        .last()
+    )
+    if not latest_by_trader.empty:
+        return float(latest_by_trader.sum())
+
+    return STARTING_JPY_BALANCE
 
 
-def _current_holdings() -> dict[str, Decimal]:
+def _current_holdings(trader_name: str | None = None) -> dict[str, Decimal]:
     df = _load_ledger()
     if df.empty:
         return {}
+
+    if trader_name:
+        df = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
+        if df.empty:
+            return {}
 
     buy = df.loc[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
     sell = df.loc[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
@@ -207,7 +232,7 @@ def execute_trade(
         return {
             "status": "error",
             "message": "Trader_Name is required",
-            "remaining_jpy_balance": _latest_balance(),
+            "remaining_jpy_balance": _latest_balance(student),
         }
 
     if auth_code != "AUTO" and student.casefold() != "system":
@@ -215,7 +240,7 @@ def execute_trade(
             return {
                 "status": "error",
                 "message": f"Authentication failed for {student}. Invalid code.",
-                "remaining_jpy_balance": _latest_balance(),
+                "remaining_jpy_balance": _latest_balance(student),
             }
 
     if not _is_market_open(symbol):
@@ -223,7 +248,7 @@ def execute_trade(
             "status": "error",
             "message": f"{_exchange_name(symbol)} market is currently closed. Order rejected.",
             "exchange": _exchange_name(symbol),
-            "remaining_jpy_balance": _latest_balance(),
+            "remaining_jpy_balance": _latest_balance(student),
         }
 
     qty = _d(quantity)
@@ -235,7 +260,7 @@ def execute_trade(
         return {
             "status": "error",
             "message": f"Live price unavailable for {symbol}. Order rejected.",
-            "remaining_jpy_balance": _latest_balance(),
+            "remaining_jpy_balance": _latest_balance(student),
         }
 
     last_seen_price = _d(last_seen_price_raw)
@@ -253,7 +278,7 @@ def execute_trade(
             return {
                 "status": "error",
                 "message": "USD/JPY FX rate unavailable. Order rejected.",
-                "remaining_jpy_balance": _latest_balance(),
+                "remaining_jpy_balance": _latest_balance(student),
             }
 
         live_mid_fx_rate = _d(fx_quote["live_mid_market_rate"])
@@ -271,10 +296,10 @@ def execute_trade(
     else:
         total_jpy_impact = gross_jpy_mid - fx_conversion_fee_paid - commission_paid
 
-    previous_balance = _d(_latest_balance())
+    previous_balance = _d(_latest_balance(student))
 
     if normalized_action == "SELL":
-        holdings = _current_holdings()
+        holdings = _current_holdings(student)
         available_qty = holdings.get(symbol, Decimal("0"))
         if qty > available_qty:
             return {
