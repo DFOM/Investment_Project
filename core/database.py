@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Final, Optional
+from typing import Any, Final
 import logging
+import sys
 
 import pandas as pd
 
@@ -30,6 +30,57 @@ ORDER_BOOK_COLUMNS: Final[list[str]] = [
 ]
 TEAM_AUTH_COLUMNS: Final[list[str]] = ["Trader_Name", "Auth_Code", "Active", "Created_At"]
 
+
+
+_LEDGER_RENAME_MAP: Final[dict[str, str]] = {
+    "id": "ID",
+    "timestamp": "Timestamp",
+    "ticker": "Ticker",
+    "action": "Action",
+    "quantity": "Quantity",
+    "local_asset_price": "Local_Asset_Price",
+    "executed_fx_rate": "Executed_FX_Rate",
+    "total_jpy_impact": "Total_JPY_Impact",
+    "remaining_jpy_balance": "Remaining_JPY_Balance",
+    "trader_name": "Trader_Name",
+    "commission_paid": "Commission_Paid",
+    "fx_conversion_fee_paid": "FX_Conversion_Fee",
+    "trade_rationale": "Trade_Rationale",
+    "created_at": "Created_At",
+}
+
+_PERFORMANCE_RENAME_MAP: Final[dict[str, str]] = {
+    "trader_name": "Trader_Name",
+}
+
+_ORDER_BOOK_RENAME_MAP: Final[dict[str, str]] = {
+    "id": "ID",
+    "timestamp": "Timestamp",
+    "ticker": "Ticker",
+    "action": "Action",
+    "mode": "Mode",
+    "value": "Value",
+    "rationale": "Rationale",
+    "status": "Status",
+    "trader_name": "Trader_Name",
+    "created_at": "Created_At",
+    "updated_at": "Updated_At",
+}
+
+_TEAM_AUTH_RENAME_MAP: Final[dict[str, str]] = {
+    "id": "ID",
+    "trader_name": "Trader_Name",
+    "auth_code": "Auth_Code",
+    "active": "Active",
+    "created_at": "Created_At",
+}
+
+
+def _rows_to_frame(rows: list[Any], rename_map: dict[str, str]) -> pd.DataFrame:
+    """Convert psycopg2 DictRow results into a DataFrame with legacy UI column names."""
+    if not rows:
+        return pd.DataFrame(columns=list(rename_map.values()))
+    return pd.DataFrame([dict(row) for row in rows]).rename(columns=rename_map)
 
 def record_trade(timestamp, ticker, action, quantity, local_asset_price, executed_fx_rate,
                  total_jpy_impact, remaining_jpy_balance, trader_name, commission_paid=0,
@@ -55,24 +106,152 @@ def get_cached_ledger_df() -> pd.DataFrame:
     """Fetch complete ledger as DataFrame."""
     try:
         db = get_postgres_db()
-        results = db.execute_query("SELECT * FROM ledger ORDER BY timestamp")
-        return pd.DataFrame(results) if results else pd.DataFrame()
+        results = db.execute_query("SELECT * FROM ledger ORDER BY timestamp, id")
+        return _rows_to_frame(results, _LEDGER_RENAME_MAP)
     except Exception as e:
         logger.error(f"Failed to fetch ledger: {e}")
         return pd.DataFrame()
 
 
-def record_daily_performance(trader_name: str, portfolio_value_jpy: Decimal) -> dict[str, Any]:
-    """Record daily portfolio valuation."""
+def _upsert_daily_performance_row(
+    trader_name: str,
+    portfolio_value_jpy: Decimal,
+    snapshot_date: date | None = None,
+) -> dict[str, Any]:
+    """Insert or update one daily portfolio valuation row."""
+    db = get_postgres_db()
+    effective_date = snapshot_date or date.today()
+    db.execute_update("""
+        INSERT INTO performance (date, trader_name, portfolio_value_jpy)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (date, trader_name)
+        DO UPDATE SET portfolio_value_jpy = EXCLUDED.portfolio_value_jpy
+        """, (effective_date, trader_name, float(portfolio_value_jpy)))
+    return {"success": True, "date": str(effective_date), "trader_name": trader_name}
+
+
+def _calculate_current_holdings(ledger: pd.DataFrame) -> dict[str, float]:
+    if ledger.empty or "Action" not in ledger.columns:
+        return {}
+
+    trade_rows = ledger[ledger["Action"].isin(["BUY", "SELL"])].copy()
+    if trade_rows.empty:
+        return {}
+
+    trade_rows["Quantity"] = pd.to_numeric(trade_rows["Quantity"], errors="coerce").fillna(0)
+    buys = trade_rows.loc[trade_rows["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+    sells = trade_rows.loc[trade_rows["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+    net = buys.sub(sells, fill_value=0.0)
+    return {str(ticker): float(quantity) for ticker, quantity in net.items() if float(quantity) > 0}
+
+
+def _latest_cash_balance(ledger: pd.DataFrame) -> float:
+    from core.setup_env import STARTING_JPY_BALANCE
+
+    if ledger.empty or "Remaining_JPY_Balance" not in ledger.columns:
+        return float(STARTING_JPY_BALANCE)
+    balances = pd.to_numeric(ledger["Remaining_JPY_Balance"], errors="coerce").dropna()
+    return float(balances.iloc[-1]) if not balances.empty else float(STARTING_JPY_BALANCE)
+
+
+def _value_holdings_jpy(holdings: dict[str, float], usd_jpy: float) -> tuple[float, list[str], dict[str, float]]:
+    from core.market_data import get_live_price
+
+    equity_jpy = 0.0
+    skipped: list[str] = []
+    live_prices: dict[str, float] = {}
+
+    for ticker, quantity in holdings.items():
+        price = get_live_price(ticker, fallback=None)
+        if price is None:
+            skipped.append(ticker)
+            continue
+
+        resolved_price = float(price)
+        live_prices[ticker] = resolved_price
+        if ticker.upper().endswith(".T"):
+            equity_jpy += quantity * resolved_price
+        else:
+            equity_jpy += quantity * resolved_price * usd_jpy
+
+    return equity_jpy, skipped, live_prices
+
+
+def _record_portfolio_snapshot() -> dict[str, Any]:
+    """Calculate and persist All Team plus per-member daily portfolio snapshots."""
+    from core.market_data import get_current_usd_jpy
+    from core.setup_env import STARTING_JPY_BALANCE
+
+    ledger = get_cached_ledger_df().copy()
+    if not ledger.empty:
+        ledger["Ticker"] = ledger["Ticker"].astype(str).str.strip().str.upper()
+        ledger["Action"] = ledger["Action"].astype(str).str.strip().str.upper()
+        ledger["Trader_Name"] = ledger["Trader_Name"].astype(str).str.strip()
+
+    cash = _latest_cash_balance(ledger)
+    holdings = _calculate_current_holdings(ledger)
+    usd_jpy = get_current_usd_jpy(fallback=150.0) or 150.0
+    equity_jpy, skipped, live_prices = _value_holdings_jpy(holdings, usd_jpy)
+    total_jpy = cash + equity_jpy
+    today = datetime.now(timezone.utc).date()
+
+    _upsert_daily_performance_row("All Team", Decimal(str(total_jpy)), today)
+
+    if not ledger.empty and "Trader_Name" in ledger.columns:
+        traders = [
+            trader for trader in ledger["Trader_Name"].dropna().unique()
+            if str(trader).strip().casefold() not in {"", "system", "all team"}
+        ]
+        for trader in traders:
+            trader_df = ledger[ledger["Trader_Name"] == trader].copy()
+            trader_holdings = _calculate_current_holdings(trader_df)
+            trader_equity = 0.0
+            for ticker, quantity in trader_holdings.items():
+                if ticker not in live_prices:
+                    continue
+                if ticker.upper().endswith(".T"):
+                    trader_equity += quantity * live_prices[ticker]
+                else:
+                    trader_equity += quantity * live_prices[ticker] * usd_jpy
+
+            trader_df["Total_JPY_Impact"] = pd.to_numeric(
+                trader_df.get("Total_JPY_Impact", pd.Series(dtype=float)),
+                errors="coerce",
+            ).fillna(0)
+            buys_impact = trader_df.loc[trader_df["Action"] == "BUY", "Total_JPY_Impact"].sum()
+            sells_impact = trader_df.loc[trader_df["Action"] == "SELL", "Total_JPY_Impact"].sum()
+            net_invested = abs(float(buys_impact)) - abs(float(sells_impact))
+            starting_allocation = float(STARTING_JPY_BALANCE) / max(len(traders), 1)
+            trader_value = starting_allocation + net_invested + trader_equity
+            _upsert_daily_performance_row(str(trader), Decimal(str(trader_value)), today)
+
+    return {
+        "success": True,
+        "date": today.isoformat(),
+        "cash_jpy": cash,
+        "equity_jpy": equity_jpy,
+        "total_portfolio_value_jpy": total_jpy,
+        "usd_jpy_rate": usd_jpy,
+        "tickers_skipped": skipped,
+    }
+
+
+def record_daily_performance(
+    trader_name: str | None = None,
+    portfolio_value_jpy: Decimal | float | int | str | None = None,
+) -> dict[str, Any]:
+    """Record daily performance.
+
+    With no arguments, calculate and persist a full current portfolio snapshot for
+    the background worker and dashboard refresh button. With arguments, upsert a
+    single explicit trader valuation row for compatibility with direct callers.
+    """
     try:
-        db = get_postgres_db()
-        today = date.today()
-        db.execute_update("""
-            INSERT INTO performance (date, trader_name, portfolio_value_jpy)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (date, trader_name) DO UPDATE SET portfolio_value_jpy = EXCLUDED.portfolio_value_jpy
-            """, (today, trader_name, float(portfolio_value_jpy)))
-        return {"success": True, "date": str(today), "trader_name": trader_name}
+        if trader_name is None and portfolio_value_jpy is None:
+            return _record_portfolio_snapshot()
+        if trader_name is None or portfolio_value_jpy is None:
+            raise ValueError("trader_name and portfolio_value_jpy must be provided together.")
+        return _upsert_daily_performance_row(trader_name, Decimal(str(portfolio_value_jpy)))
     except Exception as e:
         logger.error(f"Failed to record performance: {e}")
         return {"success": False, "error": str(e)}
@@ -83,7 +262,7 @@ def get_cached_performance_df() -> pd.DataFrame:
     try:
         db = get_postgres_db()
         results = db.execute_query("SELECT * FROM performance ORDER BY date, trader_name")
-        return pd.DataFrame(results) if results else pd.DataFrame()
+        return _rows_to_frame(results, _PERFORMANCE_RENAME_MAP)
     except Exception as e:
         logger.error(f"Failed to fetch performance: {e}")
         return pd.DataFrame()
@@ -107,8 +286,8 @@ def get_pending_orders() -> pd.DataFrame:
     """Fetch all pending orders as DataFrame."""
     try:
         db = get_postgres_db()
-        results = db.execute_query("SELECT * FROM order_book WHERE status = 'PENDING' ORDER BY timestamp")
-        return pd.DataFrame(results) if results else pd.DataFrame()
+        results = db.execute_query("SELECT * FROM order_book WHERE status = 'PENDING' ORDER BY timestamp, id")
+        return _rows_to_frame(results, _ORDER_BOOK_RENAME_MAP)
     except Exception as e:
         logger.error(f"Failed to fetch pending orders: {e}")
         return pd.DataFrame()
@@ -130,8 +309,8 @@ def get_cached_team_auth_df() -> pd.DataFrame:
     """Fetch team authentication data as DataFrame."""
     try:
         db = get_postgres_db()
-        results = db.execute_query("SELECT * FROM team_auth")
-        return pd.DataFrame(results) if results else pd.DataFrame()
+        results = db.execute_query("SELECT * FROM team_auth ORDER BY trader_name")
+        return _rows_to_frame(results, _TEAM_AUTH_RENAME_MAP)
     except Exception as e:
         logger.error(f"Failed to fetch team auth: {e}")
         return pd.DataFrame()
@@ -168,7 +347,7 @@ def get_borrowing_history(trader_name: str) -> pd.DataFrame:
         db = get_postgres_db()
         results = db.execute_query("SELECT * FROM borrowing WHERE trader_name = %s ORDER BY borrow_date DESC",
                                  (trader_name,))
-        return pd.DataFrame(results) if results else pd.DataFrame()
+        return pd.DataFrame([dict(row) for row in results]) if results else pd.DataFrame()
     except Exception as e:
         logger.error(f"Failed to fetch borrowing history: {e}")
         return pd.DataFrame()
@@ -232,8 +411,17 @@ def get_database() -> PostgreSQLDatabase:
 
 
 def clear_data_cache() -> None:
-    """Clear any in-process caches."""
-    pass
+    """Clear in-process Streamlit caches when Streamlit is loaded."""
+    streamlit_module = sys.modules.get("streamlit")
+    cache_data = getattr(streamlit_module, "cache_data", None) if streamlit_module else None
+    clear = getattr(cache_data, "clear", None) if cache_data else None
+    if callable(clear):
+        clear()
+
+
+# Backward compatibility for pages that previously used an lru_cache-wrapped
+# Google Sheets get_database() function and manually called cache_clear().
+get_database.cache_clear = clear_data_cache  # type: ignore[attr-defined]
 
 
 def start_new_simulation(starting_capital: Decimal) -> dict[str, Any]:

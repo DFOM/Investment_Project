@@ -244,6 +244,110 @@ class PostgreSQLDatabase:
         
         logger.info("✅ Database schema verified/created")
 
+    def append_ledger_row(self, row: dict[str, Any]) -> None:
+        """Append a legacy Ledger-style row to the PostgreSQL ledger table."""
+        self.execute_update("""
+            INSERT INTO ledger (timestamp, ticker, action, quantity, local_asset_price,
+                executed_fx_rate, total_jpy_impact, remaining_jpy_balance,
+                trader_name, commission_paid, fx_conversion_fee_paid, trade_rationale)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row.get("Timestamp"),
+                row.get("Ticker"),
+                row.get("Action"),
+                row.get("Quantity", 0),
+                row.get("Local_Asset_Price", 0),
+                row.get("Executed_FX_Rate", 1),
+                row.get("Total_JPY_Impact", 0),
+                row.get("Remaining_JPY_Balance", 0),
+                row.get("Trader_Name", ""),
+                row.get("Commission_Paid", 0),
+                row.get("FX_Conversion_Fee", row.get("FX_Conversion_Fee_Paid", 0)),
+                row.get("Trade_Rationale", ""),
+            ))
+
+    def append_order_book_row(self, row: dict[str, Any]) -> None:
+        """Append a legacy Order_Book-style row to the PostgreSQL order book."""
+        self.execute_update("""
+            INSERT INTO order_book (timestamp, ticker, action, mode, value, rationale, status, trader_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row.get("Timestamp"),
+                row.get("Ticker"),
+                row.get("Action"),
+                row.get("Mode"),
+                row.get("Value", 0),
+                row.get("Rationale", ""),
+                row.get("Status", "PENDING"),
+                row.get("Trader_Name", ""),
+            ))
+
+    def get_order_book_df(self):
+        """Return the order book using the legacy column names expected by the UI."""
+        import pandas as pd
+
+        results = self.execute_query("SELECT * FROM order_book ORDER BY timestamp, id")
+        if not results:
+            return pd.DataFrame(columns=[
+                "ID", "Timestamp", "Ticker", "Action", "Mode", "Value",
+                "Rationale", "Status", "Trader_Name", "Created_At", "Updated_At",
+            ])
+
+        df = pd.DataFrame([dict(row) for row in results])
+        return df.rename(columns={
+            "id": "ID",
+            "timestamp": "Timestamp",
+            "ticker": "Ticker",
+            "action": "Action",
+            "mode": "Mode",
+            "value": "Value",
+            "rationale": "Rationale",
+            "status": "Status",
+            "trader_name": "Trader_Name",
+            "created_at": "Created_At",
+            "updated_at": "Updated_At",
+        })
+
+    def update_order_status(self, order_id_or_timestamp: Any, status: str) -> bool:
+        """Update an order by numeric id when available, otherwise by timestamp."""
+        if isinstance(order_id_or_timestamp, int) or str(order_id_or_timestamp).isdigit():
+            affected = self.execute_update(
+                "UPDATE order_book SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (status, int(order_id_or_timestamp)),
+            )
+        else:
+            affected = self.execute_update(
+                "UPDATE order_book SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE timestamp = %s",
+                (status, order_id_or_timestamp),
+            )
+        return affected > 0
+
+    def upsert_team_auth(self, trader_name: str, auth_code: str, active: bool = True) -> None:
+        """Insert or update a team member authentication row."""
+        self.execute_update("""
+            INSERT INTO team_auth (trader_name, auth_code, active)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (trader_name)
+            DO UPDATE SET auth_code = EXCLUDED.auth_code, active = EXCLUDED.active
+            """, (trader_name, auth_code, active))
+
+    def rename_team_auth(self, old_name: str, new_name: str) -> bool:
+        """Rename a team member in the auth table."""
+        affected = self.execute_update(
+            "UPDATE team_auth SET trader_name = %s WHERE LOWER(trader_name) = LOWER(%s)",
+            (new_name, old_name),
+        )
+        return affected > 0
+
+    def initialize_and_format_worksheets(self) -> dict[str, Any]:
+        """Backward-compatible no-op for old Google Sheets admin action."""
+        self.ensure_schema()
+        return {
+            "ledger_header_columns": 12,
+            "performance_header_columns": 3,
+            "genesis_row_written": False,
+        }
+
 
 _db: Optional[PostgreSQLDatabase] = None
 
