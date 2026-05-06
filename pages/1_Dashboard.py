@@ -9,7 +9,9 @@ from core.database import (
     get_database,
     get_cached_ledger_df,
     get_cached_performance_df,
+    get_simulation_settings,
     record_daily_performance,
+    resolve_member_initial_allocations,
 )
 from core.market_data import get_current_usd_jpy, get_live_price
 from core.setup_env import STARTING_JPY_BALANCE, setup_environment
@@ -117,6 +119,30 @@ def _weighted_avg_cost(ledger: pd.DataFrame) -> dict[str, float]:
         wac[str(ticker)] = float(total_cost / total_qty) if total_qty > 0 else 0.0
     return wac
 
+
+
+def _latest_cash_for_scope(ledger: pd.DataFrame, scoped: pd.DataFrame, is_all: bool) -> float:
+    settings = get_simulation_settings()
+    if ledger.empty:
+        return float(settings["total_starting_capital_jpy"]) if is_all else 0.0
+    source = ledger if is_all else scoped
+    if source.empty or "Remaining_JPY_Balance" not in source.columns:
+        return 0.0
+    latest = (
+        source.dropna(subset=["Remaining_JPY_Balance"])
+        .sort_values("Timestamp")
+        .groupby("Trader_Name")["Remaining_JPY_Balance"]
+        .last()
+    )
+    return float(latest.sum()) if not latest.empty else 0.0
+
+
+def _starting_capital_for_selection(selected_member: str, is_all: bool) -> float:
+    settings = get_simulation_settings()
+    if is_all:
+        return float(settings["total_starting_capital_jpy"])
+    allocations = resolve_member_initial_allocations(settings["total_starting_capital_jpy"])
+    return float(allocations.get(selected_member, 0.0))
 
 def _is_jp_ticker(ticker: str) -> bool:
     return ticker.upper().endswith(".T")
@@ -344,10 +370,8 @@ def main() -> None:
     usd_jpy = get_current_usd_jpy(fallback=150.0) or 150.0
 
     # ── Cash balance ───────────────────────────────────────────────────────────
-    if ledger.empty:
-        cash = float(STARTING_JPY_BALANCE)
-    else:
-        cash = float(ledger["Remaining_JPY_Balance"].dropna().iloc[-1])
+    cash = _latest_cash_for_scope(ledger, scoped, is_all)
+    starting_capital = _starting_capital_for_selection(selected, is_all)
 
     # ── Live holdings sync ─────────────────────────────────────────────────────
     holdings = _net_holdings(scoped)
@@ -372,7 +396,7 @@ def main() -> None:
     
     if is_all:
         total = cash + equity_jpy
-        roi = ((total - STARTING_JPY_BALANCE) / STARTING_JPY_BALANCE) * 100.0
+        roi = ((total - starting_capital) / starting_capital) * 100.0 if starting_capital else 0.0
 
     # ── KPI metrics ────────────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
@@ -476,7 +500,7 @@ def main() -> None:
             hist_view, x="date", y="portfolio_value_jpy",
             title="Portfolio Value Over Time (Daily)", markers=True,
         )
-        fig.add_hline(y=STARTING_JPY_BALANCE, line_dash="dot", line_color="gray", annotation_text="Starting Capital")
+        fig.add_hline(y=starting_capital, line_dash="dot", line_color="gray", annotation_text="Starting Capital")
         fig.update_xaxes(title_text="Date")
         fig.update_yaxes(title_text="Portfolio Value (¥)")
         st.plotly_chart(fig, use_container_width=True)
