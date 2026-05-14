@@ -137,6 +137,22 @@ def _get_member_portfolio_value(trader_name: str) -> float:
 
     holdings = _net_holdings_from_ledger(trader_ledger)
 
+    ledger = get_cached_ledger_df()
+    allocations = resolve_member_initial_allocations()
+    fallback_allocation = allocations.get(trader_name, STARTING_JPY_BALANCE / max(len(allocations), 1))
+    if ledger.empty:
+        return fallback_allocation
+    
+    trader_ledger = ledger[ledger["Trader_Name"] == trader_name]
+    if trader_ledger.empty:
+        return fallback_allocation
+    
+    # Calculate net holdings
+    buys = trader_ledger[trader_ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+    sells = trader_ledger[trader_ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+    net = buys.sub(sells, fill_value=0.0)
+    holdings = {str(t): float(q) for t, q in net.items() if float(q) > 0}
+    
     # Calculate equity value
     usd_jpy = float(get_current_usd_jpy(fallback=150.0) or 150.0)
     equity = 0.0
@@ -159,6 +175,7 @@ def _get_member_portfolio_value(trader_name: str) -> float:
     else:
         cash = fallback_allocation
 
+    
     return cash + equity
 
 
