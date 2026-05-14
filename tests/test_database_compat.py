@@ -250,6 +250,16 @@ class DatabaseCompatibilityTests(unittest.TestCase):
         self.assertIn("last_daily_run_date = datetime.now(timezone.utc).date()", body)
         self.assertIn("upserts by (date, trader)", body)
 
+    def test_borrowing_tab_coerces_postgres_decimal_numbers(self) -> None:
+        body = Path("pages/7_Borrowing_Tab.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _load_member_ledger", body)
+        self.assertIn('for column in ["Quantity", "Local_Asset_Price", "Total_JPY_Impact", "Remaining_JPY_Balance"]', body)
+        self.assertIn('frame[column] = pd.to_numeric(frame[column], errors="coerce")', body)
+        self.assertIn('quantities = pd.to_numeric(member_ledger["Quantity"], errors="coerce").fillna(0.0)', body)
+        self.assertIn("price_value = float(price)", body)
+        self.assertNotIn('ledger["Trader_Name"] == trader_name', body)
+
     def test_railway_build_uses_nixpacks_default_install_once(self) -> None:
         body = Path("railway.json").read_text(encoding="utf-8")
 
