@@ -63,7 +63,10 @@ def run_daily():
     logging.info("Recording daily portfolio performance for all members...")
     try:
         snap = record_daily_performance()
-        logging.info(f"Snapshot successful: {snap['total_portfolio_value_jpy']} JPY")
+        if snap.get("success"):
+            logging.info(f"Snapshot successful: {snap['total_portfolio_value_jpy']} JPY")
+        else:
+            logging.error(f"Snapshot failed: {snap.get('error', 'unknown error')}")
     except Exception as e:
         logging.error(f"Error in daily task: {e}")
 
@@ -77,8 +80,12 @@ if __name__ == "__main__":
     last_order_run = time.time()
     last_daily_run_date = None
 
-    # Run initial execution immediately on start
+    # Run initial execution and snapshot immediately on start. The performance
+    # table upserts by (date, trader), so restarting Railway refreshes today's
+    # point without creating duplicates.
     run_hourly()
+    run_daily()
+    last_daily_run_date = datetime.now(timezone.utc).date()
 
     while True:
         now = time.time()

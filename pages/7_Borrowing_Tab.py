@@ -29,7 +29,14 @@ import plotly.graph_objects as go
 import streamlit as st
 from datetime import date, datetime, timedelta
 
-from core.database import get_cached_ledger_df, get_database, get_borrowing_history, record_borrowing, record_repayment
+from core.database import (
+    get_cached_ledger_df,
+    get_borrowing_history,
+    get_simulation_settings,
+    record_borrowing,
+    record_repayment,
+    resolve_member_initial_allocations,
+)
 from core.market_data import get_current_usd_jpy, get_live_price
 from core.setup_env import setup_environment, STARTING_JPY_BALANCE
 from core.trade_executor import format_currency
@@ -52,7 +59,6 @@ RAKUTEN_INTRADAY_RATE = 0.00  # 0.00% (no interest if closed same day)
 RAKUTEN_STOCK_RENTAL_RATE = 0.011  # 1.10% per annum (for short positions)
 RAKUTEN_ADMIN_FEE_PER_SHARE = 0.11  # ¥0.11 per share
 RAKUTEN_MIN_ADMIN_FEE = 110  # ¥110 minimum
-MARGIN_REQUIREMENT = 0.50  # 50% margin requirement
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -77,61 +83,102 @@ def _member_selector() -> str:
     return st.selectbox("Select Team Member", members, key="borrow_trader_name")
 
 
+def _fallback_allocation_for_member(trader_name: str) -> float:
+    """Return configured starting allocation for a member, case-insensitively."""
+    allocations = resolve_member_initial_allocations()
+    for member, allocation in allocations.items():
+        if member.casefold() == trader_name.strip().casefold():
+            return float(allocation)
+    return STARTING_JPY_BALANCE / max(len(allocations), 1)
+
+
+def _load_member_ledger(trader_name: str) -> pd.DataFrame:
+    """Return a member-scoped ledger with PostgreSQL Decimal values coerced to floats."""
+    ledger = get_cached_ledger_df()
+    if ledger.empty or "Trader_Name" not in ledger.columns:
+        return pd.DataFrame()
+
+    aliases = {name.casefold() for name in get_member_aliases(trader_name)}
+    if not aliases:
+        aliases = {trader_name.strip().casefold()}
+    frame = ledger[ledger["Trader_Name"].astype(str).str.strip().str.casefold().isin(aliases)].copy()
+    if frame.empty:
+        return frame
+
+    if "Ticker" in frame.columns:
+        frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
+    if "Action" in frame.columns:
+        frame["Action"] = frame["Action"].astype(str).str.strip().str.upper()
+    for column in ["Quantity", "Local_Asset_Price", "Total_JPY_Impact", "Remaining_JPY_Balance"]:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce").astype(float)
+    return frame
+
+
+def _net_holdings_from_ledger(member_ledger: pd.DataFrame) -> dict[str, float]:
+    """Calculate current holdings without pandas Decimal/object arithmetic."""
+    if member_ledger.empty or not {"Action", "Ticker", "Quantity"}.issubset(member_ledger.columns):
+        return {}
+
+    frame = member_ledger.copy()
+    frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)
+    frame["Action"] = frame["Action"].astype(str).str.strip().str.upper()
+    frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
+
+    holdings: dict[str, float] = {}
+    for _, row in frame.iterrows():
+        ticker = str(row.get("Ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        quantity = float(row.get("Quantity", 0.0) or 0.0)
+        action = str(row.get("Action", "")).strip().upper()
+        if action == "BUY":
+            holdings[ticker] = holdings.get(ticker, 0.0) + quantity
+        elif action == "SELL":
+            holdings[ticker] = holdings.get(ticker, 0.0) - quantity
+
+    return {ticker: quantity for ticker, quantity in holdings.items() if quantity > 0}
+
+
 @st.cache_data(ttl=300)
 def _get_member_portfolio_value(trader_name: str) -> float:
     """Calculate current portfolio value for a member."""
-    ledger = get_cached_ledger_df()
-    if ledger.empty:
-        return STARTING_JPY_BALANCE / 3
-    
-    trader_ledger = ledger[ledger["Trader_Name"] == trader_name]
+    fallback_allocation = _fallback_allocation_for_member(trader_name)
+    trader_ledger = _load_member_ledger(trader_name)
     if trader_ledger.empty:
-        return STARTING_JPY_BALANCE / 3
-    
-    # Calculate net holdings
-    buys = trader_ledger[trader_ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
-    sells = trader_ledger[trader_ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
-    net = buys.sub(sells, fill_value=0.0)
-    holdings = {str(t): float(q) for t, q in net.items() if float(q) > 0}
-    
+        return fallback_allocation
+
+    holdings = _net_holdings_from_ledger(trader_ledger)
+
     # Calculate equity value
-    usd_jpy = get_current_usd_jpy(fallback=150.0) or 150.0
+    usd_jpy = float(get_current_usd_jpy(fallback=150.0) or 150.0)
     equity = 0.0
     for ticker, qty in holdings.items():
         try:
             price = get_live_price(ticker)
-            if price:
+            if price is not None:
+                price_value = float(price)
                 if ticker.endswith(".T"):
-                    equity += qty * price  # TSE stocks in JPY
+                    equity += qty * price_value  # TSE stocks in JPY
                 else:
-                    equity += qty * price * usd_jpy  # US stocks converted to JPY
+                    equity += qty * price_value * usd_jpy  # US stocks converted to JPY
         except Exception:
             pass
-    
+
     # Get cash balance
     if "Remaining_JPY_Balance" in trader_ledger.columns:
-        cash = float(trader_ledger["Remaining_JPY_Balance"].dropna().iloc[-1])
+        balances = pd.to_numeric(trader_ledger["Remaining_JPY_Balance"], errors="coerce").astype(float).dropna()
+        cash = float(balances.iloc[-1]) if not balances.empty else fallback_allocation
     else:
-        cash = STARTING_JPY_BALANCE / 3
-    
+        cash = fallback_allocation
+
     return cash + equity
 
 
 @st.cache_data(ttl=300)
 def _get_current_holdings(trader_name: str) -> dict[str, float]:
     """Get current stock holdings for a member."""
-    ledger = get_cached_ledger_df()
-    if ledger.empty:
-        return {}
-    
-    trader_ledger = ledger[ledger["Trader_Name"] == trader_name]
-    if trader_ledger.empty:
-        return {}
-    
-    buys = trader_ledger[trader_ledger["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
-    sells = trader_ledger[trader_ledger["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
-    net = buys.sub(sells, fill_value=0.0)
-    return {str(t): float(q) for t, q in net.items() if float(q) > 0}
+    return _net_holdings_from_ledger(_load_member_ledger(trader_name))
 
 
 def _calculate_daily_interest(borrowed_amount: float, annual_rate: float) -> float:
@@ -149,8 +196,7 @@ def _calculate_monthly_interest(borrowed_amount: float, annual_rate: float) -> f
 st.title("🏦 Margin Borrowing Centre")
 st.markdown("""
 This page simulates **Rakuten Securities margin trading (信用取引)**. 
-Each member can borrow up to **50% of their portfolio value** and pay 
-accurate Rakuten interest rates.
+Each member can borrow up to the Admin-configured percentage of their portfolio value and pay simulated Rakuten-style interest rates.
 """)
 
 # Rate information expander
@@ -178,9 +224,16 @@ trader_name = _member_selector()
 aliases = get_member_aliases(trader_name)
 member_display = aliases[0] if aliases else trader_name
 
-# Get portfolio value
+# Get portfolio value and Admin-configured borrowing policy
+settings = get_simulation_settings()
+margin_requirement = float(settings["borrowing_limit_pct"])
+local_borrow_rate = float(settings["local_borrow_rate_pct"])
+global_borrow_rate = float(settings["global_borrow_rate_pct"])
+preferential_borrow_rate = float(settings["preferential_borrow_rate_pct"])
+margin_call_pct = float(settings["margin_call_pct"])
+forced_liquidation_pct = float(settings["forced_liquidation_pct"])
 portfolio_value = _get_member_portfolio_value(trader_name)
-max_borrow = portfolio_value * MARGIN_REQUIREMENT
+max_borrow = portfolio_value * margin_requirement
 
 # ── Borrowing Interface ─────────────────────────────────────────────────────
 
@@ -193,7 +246,7 @@ with col1:
     st.metric("Portfolio Value", _fmt_jpy(portfolio_value))
 
 with col2:
-    st.metric("Max Borrowable (50%)", _fmt_jpy(max_borrow))
+    st.metric(f"Max Borrowable ({margin_requirement * 100:.0f}%)", _fmt_jpy(max_borrow))
 
 with col3:
     # Get current borrow from database
@@ -202,7 +255,7 @@ with col3:
     st.metric("Current Borrowed", _fmt_jpy(current_borrow))
 
 with col4:
-    available_to_borrow = max_borrow - current_borrow
+    available_to_borrow = max(max_borrow - current_borrow, 0.0)
     st.metric("Available", _fmt_jpy(available_to_borrow))
 
 # Borrowing form
@@ -214,7 +267,7 @@ with col_a:
     borrow_amount = st.number_input(
         "Amount to Borrow (JPY)",
         min_value=0.0,
-        max_value=float(available_to_borrow),
+        max_value=float(max(available_to_borrow, 0.0)),
         step=100000.0,
         value=0.0,
         key="borrow_amount_input"
@@ -223,13 +276,19 @@ with col_a:
 with col_b:
     rate_option = st.selectbox(
         "Interest Rate",
-        ["Standard (2.80%)", "Preferential (2.28%)", "Intraday (0.00%)"],
+        [
+            f"Local/Japan ({local_borrow_rate * 100:.2f}%)",
+            f"Global/US ({global_borrow_rate * 100:.2f}%)",
+            f"Preferential ({preferential_borrow_rate * 100:.2f}%)",
+            "Intraday (0.00%)",
+        ],
         index=0,
         key="rate_option"
     )
     rate_map = {
-        "Standard (2.80%)": RAKUTEN_BUY_SIDE_RATE,
-        "Preferential (2.28%)": RAKUTEN_PREFERENTIAL_RATE,
+        f"Local/Japan ({local_borrow_rate * 100:.2f}%)": local_borrow_rate,
+        f"Global/US ({global_borrow_rate * 100:.2f}%)": global_borrow_rate,
+        f"Preferential ({preferential_borrow_rate * 100:.2f}%)": preferential_borrow_rate,
         "Intraday (0.00%)": RAKUTEN_INTRADAY_RATE,
     }
     selected_rate = rate_map[rate_option]
@@ -238,15 +297,20 @@ with col_c:
     st.write("")  # spacer
     st.write("")  # spacer
     if st.button("💳 Borrow", type="primary", use_container_width=True):
-        if borrow_amount > 0:
+        if borrow_amount <= 0:
+            st.warning("Enter an amount to borrow.")
+        elif borrow_amount > available_to_borrow:
+            st.error("Borrow amount exceeds this member's available borrowing capacity.")
+        else:
             try:
                 result = record_borrowing(trader_name, borrow_amount, selected_rate)
-                st.success(f"Borrowed {_fmt_jpy(borrow_amount)} successfully!")
-                st.rerun()
+                if result.get("success"):
+                    st.success(f"Borrowed {_fmt_jpy(borrow_amount)} successfully!")
+                    st.rerun()
+                else:
+                    st.error(str(result.get("error", "Borrowing failed.")))
             except Exception as e:
                 st.error(f"Error recording borrowing: {e}")
-        else:
-            st.warning("Enter an amount to borrow.")
 
 # Repayment form
 st.markdown("### 💵 Repay Funds")
@@ -391,7 +455,7 @@ with col_m2:
     # Calculate margin status
     if portfolio_value > 0:
         current_margin = (portfolio_value - current_borrow) / portfolio_value
-        margin_status = "✅ Safe" if current_margin >= 0.50 else "⚠️ Warning"
+        margin_status = "✅ Safe" if current_margin >= margin_call_pct else "⚠️ Warning"
         
         st.markdown(f"""
         ### Your Margin Status
@@ -402,10 +466,10 @@ with col_m2:
         - **Status**: {margin_status}
         """)
         
-        if current_margin < 0.50:
-            st.error("⚠️ Margin Call Warning: Your margin ratio is below 50%. Add funds or reduce borrowing.")
-        elif current_margin < 0.35:
-            st.error("🚨 Forced Liquidation Risk: Your margin ratio is below 35%!")
+        if current_margin < margin_call_pct:
+            st.error("⚠️ Margin Call Warning: Your margin ratio is below the Admin-configured warning threshold. Add funds or reduce borrowing.")
+        elif current_margin < forced_liquidation_pct:
+            st.error("🚨 Forced Liquidation Risk: Your margin ratio is below the Admin-configured forced-liquidation threshold!")
 
 # ── Historical Borrowing Record ───────────────────────────────────────────
 
