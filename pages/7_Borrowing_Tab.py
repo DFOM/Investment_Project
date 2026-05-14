@@ -179,7 +179,6 @@ def _get_member_portfolio_value(trader_name: str) -> float:
     return cash + equity
 
 
-@st.cache_data(ttl=300)
 def _get_current_holdings(trader_name: str) -> dict[str, float]:
     """Get current stock holdings for a member."""
     return _net_holdings_from_ledger(_load_member_ledger(trader_name))
