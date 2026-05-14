@@ -255,13 +255,10 @@ class DatabaseCompatibilityTests(unittest.TestCase):
 
         self.assertIn("def _load_member_ledger", body)
         self.assertIn('for column in ["Quantity", "Local_Asset_Price", "Total_JPY_Impact", "Remaining_JPY_Balance"]', body)
-        self.assertIn('frame[column] = pd.to_numeric(frame[column], errors="coerce").astype(float)', body)
-        self.assertIn('frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)', body)
-        self.assertIn('holdings[ticker] = holdings.get(ticker, 0.0) + quantity', body)
-        self.assertIn('holdings[ticker] = holdings.get(ticker, 0.0) - quantity', body)
+        self.assertIn('frame[column] = pd.to_numeric(frame[column], errors="coerce")', body)
+        self.assertIn('quantities = pd.to_numeric(member_ledger["Quantity"], errors="coerce").fillna(0.0)', body)
         self.assertIn("price_value = float(price)", body)
         self.assertNotIn('ledger["Trader_Name"] == trader_name', body)
-        self.assertNotIn('buys.sub(sells', body)
 
     def test_railway_build_uses_nixpacks_default_install_once(self) -> None:
         body = Path("railway.json").read_text(encoding="utf-8")
