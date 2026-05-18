@@ -149,6 +149,14 @@ def _latest_balance(trader_name: str | None = None) -> float:
 
     return STARTING_JPY_BALANCE
 
+    latest_by_trader = (
+        df.dropna(subset=["Remaining_JPY_Balance"])
+        .sort_values("Timestamp")
+        .groupby("Trader_Name")["Remaining_JPY_Balance"]
+        .last()
+    )
+    if not latest_by_trader.empty:
+        return float(latest_by_trader.sum())
 
 def _current_holdings(trader_name: str | None = None) -> dict[str, Decimal]:
     df = _load_ledger()
@@ -160,25 +168,9 @@ def _current_holdings(trader_name: str | None = None) -> dict[str, Decimal]:
         if df.empty:
             return {}
 
-    if not {"Action", "Ticker", "Quantity"}.issubset(df.columns):
-        return {}
-
-    frame = df.copy()
-    frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)
-    frame["Action"] = frame["Action"].astype(str).str.strip().str.upper()
-    frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
-
-    totals: dict[str, float] = {}
-    for _, row in frame.iterrows():
-        ticker = str(row.get("Ticker", "")).strip().upper()
-        if not ticker:
-            continue
-        quantity = float(row.get("Quantity", 0.0) or 0.0)
-        action = str(row.get("Action", "")).strip().upper()
-        if action == "BUY":
-            totals[ticker] = totals.get(ticker, 0.0) + quantity
-        elif action == "SELL":
-            totals[ticker] = totals.get(ticker, 0.0) - quantity
+    buy = df.loc[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+    sell = df.loc[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+    net = buy.sub(sell, fill_value=0.0)
 
     holdings: dict[str, Decimal] = {}
     for ticker, quantity in totals.items():
