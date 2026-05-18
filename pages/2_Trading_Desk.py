@@ -16,6 +16,32 @@ from decimal import Decimal
 SLIPPAGE_MIN = -0.0005
 SLIPPAGE_MAX = 0.0005
 FX_SPREAD = 0.0025  # 0.25% broker spread on USD/JPY
+METAL_TICKER_OPTIONS: dict[str, str] = {
+    "Manual ticker": "",
+    "Gold futures (GC=F)": "GC=F",
+    "Silver futures (SI=F)": "SI=F",
+    "Platinum futures (PL=F)": "PL=F",
+    "Palladium futures (PA=F)": "PA=F",
+    "Copper futures (HG=F)": "HG=F",
+}
+
+
+def _format_order_timestamp(value) -> str:
+    """Format database timestamps safely for pending-order labels."""
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        raw = str(value).strip()
+        return raw if raw else "Unknown time"
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _order_cancel_key(row: pd.Series, fallback_index: int) -> str:
+    """Return a stable Streamlit widget key for a pending order row."""
+    order_id = row.get("ID")
+    if pd.notna(order_id):
+        return f"cancel_order_id_{order_id}"
+    return f"cancel_order_{fallback_index}_{_format_order_timestamp(row.get('Timestamp', ''))}"
+
 
 
 def _format_order_timestamp(value) -> str:
@@ -329,11 +355,21 @@ def main() -> None:
             if prefetched:
                 st.session_state["last_trade_ticker"] = prefetched
             default_ticker = str(st.session_state.get("last_trade_ticker", "")).strip().upper()
-            ticker = st.text_input(
-                "Ticker Symbol",
-                value=default_ticker,
-                placeholder="AAPL or 7203.T",
-            ).strip().upper()
+            metal_choice = st.selectbox(
+                "Quick Metals / Commodities",
+                list(METAL_TICKER_OPTIONS.keys()),
+                help="Choose a yfinance metals futures ticker, or leave as Manual ticker to type stocks/ETFs yourself.",
+            )
+            selected_metal_ticker = METAL_TICKER_OPTIONS[metal_choice]
+            if selected_metal_ticker:
+                ticker = selected_metal_ticker
+                st.caption(f"Selected {metal_choice}. You can buy/sell it like any other ticker in this simulation.")
+            else:
+                ticker = st.text_input(
+                    "Ticker Symbol",
+                    value=default_ticker,
+                    placeholder="AAPL, 7203.T, GC=F, SI=F, GOLD, or SILVER",
+                ).strip().upper()
             # Clear stale estimate when buy ticker changes
             if st.session_state.get("_last_ticker") != ticker:
                 st.session_state["trade_estimate"] = None

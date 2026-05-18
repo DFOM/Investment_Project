@@ -24,6 +24,13 @@ RAKUTEN_US_COMMISSION_USD: Final[Decimal] = Decimal("1.00")  # $1 per trade
 SLIPPAGE_MIN: Final[float] = -0.0005
 SLIPPAGE_MAX: Final[float] = 0.0005
 _TSE_DIGIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d{4}$")
+METAL_TICKER_ALIASES: Final[dict[str, str]] = {
+    "GOLD": "GC=F",
+    "SILVER": "SI=F",
+    "PLATINUM": "PL=F",
+    "PALLADIUM": "PA=F",
+    "COPPER": "HG=F",
+}
 
 
 def calculate_commission(ticker: str, transaction_value_jpy: Decimal, fx_rate: Decimal | None = None) -> Decimal:
@@ -81,7 +88,7 @@ def _normalize_ticker(ticker: str) -> str:
         raise ValueError("ticker cannot be empty.")
     if _TSE_DIGIT_PATTERN.match(symbol):
         return f"{symbol}.T"
-    return symbol
+    return METAL_TICKER_ALIASES.get(symbol, symbol)
 
 
 def _database_ready():
@@ -142,6 +149,14 @@ def _latest_balance(trader_name: str | None = None) -> float:
 
     return STARTING_JPY_BALANCE
 
+    latest_by_trader = (
+        df.dropna(subset=["Remaining_JPY_Balance"])
+        .sort_values("Timestamp")
+        .groupby("Trader_Name")["Remaining_JPY_Balance"]
+        .last()
+    )
+    if not latest_by_trader.empty:
+        return float(latest_by_trader.sum())
 
 def _current_holdings(trader_name: str | None = None) -> dict[str, Decimal]:
     df = _load_ledger()
@@ -158,10 +173,10 @@ def _current_holdings(trader_name: str | None = None) -> dict[str, Decimal]:
     net = buy.sub(sell, fill_value=0.0)
 
     holdings: dict[str, Decimal] = {}
-    for ticker, quantity in net.items():
-        qty_value = _d(float(quantity))
+    for ticker, quantity in totals.items():
+        qty_value = _d(quantity)
         if qty_value > 0:
-            holdings[str(ticker)] = qty_value
+            holdings[ticker] = qty_value
     return holdings
 
 
