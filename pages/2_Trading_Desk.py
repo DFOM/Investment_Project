@@ -43,6 +43,24 @@ def _order_cancel_key(row: pd.Series, fallback_index: int) -> str:
     return f"cancel_order_{fallback_index}_{_format_order_timestamp(row.get('Timestamp', ''))}"
 
 
+
+def _format_order_timestamp(value) -> str:
+    """Format database timestamps safely for pending-order labels."""
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        raw = str(value).strip()
+        return raw if raw else "Unknown time"
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _order_cancel_key(row: pd.Series, fallback_index: int) -> str:
+    """Return a stable Streamlit widget key for a pending order row."""
+    order_id = row.get("ID")
+    if pd.notna(order_id):
+        return f"cancel_order_id_{order_id}"
+    return f"cancel_order_{fallback_index}_{_format_order_timestamp(row.get('Timestamp', ''))}"
+
+
 def _is_jp_ticker(ticker: str) -> bool:
     return ticker.upper().endswith(".T")
 
@@ -86,6 +104,10 @@ def _get_current_holdings(trader_name: str | None = None) -> dict[str, float]:
         elif action == "SELL":
             totals[ticker] = totals.get(ticker, 0.0) - quantity
     return {ticker: quantity for ticker, quantity in totals.items() if quantity > 0}
+    buys = df[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
+    sells = df[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
+    net = buys.sub(sells, fill_value=0.0)
+    return {str(t): float(q) for t, q in net.items() if float(q) > 0}
 
 
 def _enrich_holdings(holdings: dict[str, float], usd_jpy: float) -> dict[str, dict]:

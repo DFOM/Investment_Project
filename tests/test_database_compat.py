@@ -330,6 +330,10 @@ class DatabaseCompatibilityTests(unittest.TestCase):
         self.assertNotIn('@st.cache_data(ttl=300)\ndef _get_current_holdings', body)
         self.assertNotIn('ledger["Trader_Name"] == trader_name', body)
         self.assertNotIn('buys.sub(sells', body)
+        self.assertIn('frame[column] = pd.to_numeric(frame[column], errors="coerce")', body)
+        self.assertIn('quantities = pd.to_numeric(member_ledger["Quantity"], errors="coerce").fillna(0.0)', body)
+        self.assertIn("price_value = float(price)", body)
+        self.assertNotIn('ledger["Trader_Name"] == trader_name', body)
 
     def test_railway_build_uses_nixpacks_default_install_once(self) -> None:
         body = Path("railway.json").read_text(encoding="utf-8")
