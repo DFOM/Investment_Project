@@ -168,6 +168,25 @@ def _current_holdings(trader_name: str | None = None) -> dict[str, Decimal]:
         if df.empty:
             return {}
 
+    if not {"Action", "Ticker", "Quantity"}.issubset(df.columns):
+        return {}
+
+    frame = df.copy()
+    frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)
+    frame["Action"] = frame["Action"].astype(str).str.strip().str.upper()
+    frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
+
+    totals: dict[str, float] = {}
+    for _, row in frame.iterrows():
+        ticker = str(row.get("Ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        quantity = float(row.get("Quantity", 0.0) or 0.0)
+        action = str(row.get("Action", "")).strip().upper()
+        if action == "BUY":
+            totals[ticker] = totals.get(ticker, 0.0) + quantity
+        elif action == "SELL":
+            totals[ticker] = totals.get(ticker, 0.0) - quantity
     buy = df.loc[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
     sell = df.loc[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
     net = buy.sub(sell, fill_value=0.0)
@@ -488,6 +507,8 @@ def process_pending_orders() -> list[dict]:
             continue
 
         timestamp = str(order.get("Timestamp", "")).strip()
+        order_id = order.get("ID")
+        order_key = int(order_id) if pd.notna(order_id) else timestamp
 
         if not _is_market_open(symbol):
             results.append({
@@ -507,7 +528,7 @@ def process_pending_orders() -> list[dict]:
         try:
             quantity = float(value_str)
         except (ValueError, TypeError):
-            db.update_order_status(timestamp, "FAILED")
+            db.update_order_status(order_key, "FAILED")
             results.append({
                 "ticker": symbol,
                 "order_timestamp": timestamp,
@@ -517,7 +538,7 @@ def process_pending_orders() -> list[dict]:
             continue
 
         if quantity <= 0:
-            db.update_order_status(timestamp, "FAILED")
+            db.update_order_status(order_key, "FAILED")
             results.append({
                 "ticker": symbol,
                 "order_timestamp": timestamp,
@@ -538,9 +559,9 @@ def process_pending_orders() -> list[dict]:
         result["order_timestamp"] = timestamp
 
         if result.get("status") == "success":
-            db.update_order_status(timestamp, "EXECUTED")
+            db.update_order_status(order_key, "EXECUTED")
         else:
-            db.update_order_status(timestamp, "FAILED")
+            db.update_order_status(order_key, "FAILED")
 
         results.append(result)
 

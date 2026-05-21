@@ -250,11 +250,86 @@ class DatabaseCompatibilityTests(unittest.TestCase):
         self.assertIn("last_daily_run_date = datetime.now(timezone.utc).date()", body)
         self.assertIn("upserts by (date, trader)", body)
 
+    def test_trade_executor_current_holdings_handles_decimal_quantities(self) -> None:
+        from decimal import Decimal
+
+        original_ledger_loader = trade_executor.get_cached_ledger_df
+        try:
+            trade_executor.get_cached_ledger_df = lambda: pd.DataFrame(
+                {
+                    "Trader_Name": ["Alice", "Alice", "Alice"],
+                    "Ticker": ["AAPL", "AAPL", "GC=F"],
+                    "Action": ["BUY", "SELL", "BUY"],
+                    "Quantity": [Decimal("2.5"), Decimal("1.0"), Decimal("0.25")],
+                }
+            )
+
+            holdings = trade_executor._current_holdings("Alice")  # noqa: SLF001
+
+            self.assertEqual(float(holdings["AAPL"]), 1.5)
+            self.assertEqual(float(holdings["GC=F"]), 0.25)
+        finally:
+            trade_executor.get_cached_ledger_df = original_ledger_loader
+
+    def test_metal_aliases_normalize_for_execution(self) -> None:
+        self.assertEqual(trade_executor._normalize_ticker("gold"), "GC=F")  # noqa: SLF001
+        self.assertEqual(trade_executor._normalize_ticker("silver"), "SI=F")  # noqa: SLF001
+
+    def test_trade_executor_sell_holdings_avoid_decimal_subtraction(self) -> None:
+        body = Path("core/trade_executor.py").read_text(encoding="utf-8")
+
+        holdings_section = body.split("def _current_holdings", maxsplit=1)[1].split("def is_market_open", maxsplit=1)[0]
+        self.assertIn('frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)', holdings_section)
+        self.assertIn('totals[ticker] = totals.get(ticker, 0.0) + quantity', holdings_section)
+        self.assertIn('totals[ticker] = totals.get(ticker, 0.0) - quantity', holdings_section)
+        self.assertNotIn(".sub(", holdings_section)
+
+    def test_pending_orders_update_status_by_id_when_available(self) -> None:
+        body = Path("core/trade_executor.py").read_text(encoding="utf-8")
+
+        process_section = body.split("def process_pending_orders", maxsplit=1)[1].split("def format_currency", maxsplit=1)[0]
+        self.assertIn('order_id = order.get("ID")', process_section)
+        self.assertIn('order_key = int(order_id) if pd.notna(order_id) else timestamp', process_section)
+        self.assertIn('db.update_order_status(order_key, "EXECUTED")', process_section)
+        self.assertIn('db.update_order_status(order_key, "FAILED")', process_section)
+
+    def test_trading_desk_supports_metals_and_decimal_safe_holdings(self) -> None:
+        body = Path("pages/2_Trading_Desk.py").read_text(encoding="utf-8")
+
+        self.assertIn("METAL_TICKER_OPTIONS", body)
+        self.assertIn('"Gold futures (GC=F)": "GC=F"', body)
+        self.assertIn('"Silver futures (SI=F)": "SI=F"', body)
+        self.assertIn('placeholder="AAPL, 7203.T, GC=F, SI=F, GOLD, or SILVER"', body)
+        holdings_section = body.split("def _get_current_holdings", maxsplit=1)[1].split("def _enrich_holdings", maxsplit=1)[0]
+        self.assertIn('totals[ticker] = totals.get(ticker, 0.0) + quantity', holdings_section)
+        self.assertIn('totals[ticker] = totals.get(ticker, 0.0) - quantity', holdings_section)
+        self.assertNotIn(".sub(", holdings_section)
+
+    def test_market_and_executor_normalize_metal_aliases(self) -> None:
+        market_body = Path("core/market_data.py").read_text(encoding="utf-8")
+        executor_body = Path("core/trade_executor.py").read_text(encoding="utf-8")
+
+        self.assertIn('"GOLD": "GC=F"', market_body)
+        self.assertIn('"SILVER": "SI=F"', market_body)
+        self.assertIn('return _METAL_TICKER_ALIASES.get(symbol, symbol)', market_body)
+        self.assertIn('"GOLD": "GC=F"', executor_body)
+        self.assertIn('"SILVER": "SI=F"', executor_body)
+        self.assertIn('return METAL_TICKER_ALIASES.get(symbol, symbol)', executor_body)
+
     def test_borrowing_tab_coerces_postgres_decimal_numbers(self) -> None:
         body = Path("pages/7_Borrowing_Tab.py").read_text(encoding="utf-8")
 
         self.assertIn("def _load_member_ledger", body)
         self.assertIn('for column in ["Quantity", "Local_Asset_Price", "Total_JPY_Impact", "Remaining_JPY_Balance"]', body)
+        self.assertIn('frame[column] = pd.to_numeric(frame[column], errors="coerce").astype(float)', body)
+        self.assertIn('frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)', body)
+        self.assertIn('holdings[ticker] = holdings.get(ticker, 0.0) + quantity', body)
+        self.assertIn('holdings[ticker] = holdings.get(ticker, 0.0) - quantity', body)
+        self.assertIn("price_value = float(price)", body)
+        self.assertNotIn('@st.cache_data(ttl=300)\ndef _get_member_portfolio_value', body)
+        self.assertNotIn('@st.cache_data(ttl=300)\ndef _get_current_holdings', body)
+        self.assertNotIn('ledger["Trader_Name"] == trader_name', body)
+        self.assertNotIn('buys.sub(sells', body)
         self.assertIn('frame[column] = pd.to_numeric(frame[column], errors="coerce")', body)
         self.assertIn('quantities = pd.to_numeric(member_ledger["Quantity"], errors="coerce").fillna(0.0)', body)
         self.assertIn("price_value = float(price)", body)

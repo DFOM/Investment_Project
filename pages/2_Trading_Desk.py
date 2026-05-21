@@ -92,6 +92,18 @@ def _get_current_holdings(trader_name: str | None = None) -> dict[str, float]:
         df = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
         if df.empty:
             return {}
+    totals: dict[str, float] = {}
+    for _, row in df.iterrows():
+        ticker = str(row.get("Ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        quantity = float(row.get("Quantity", 0.0) or 0.0)
+        action = str(row.get("Action", "")).strip().upper()
+        if action == "BUY":
+            totals[ticker] = totals.get(ticker, 0.0) + quantity
+        elif action == "SELL":
+            totals[ticker] = totals.get(ticker, 0.0) - quantity
+    return {ticker: quantity for ticker, quantity in totals.items() if quantity > 0}
     buys = df[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
     sells = df[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
     net = buys.sub(sells, fill_value=0.0)

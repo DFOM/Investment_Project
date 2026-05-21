@@ -111,11 +111,36 @@ def _load_member_ledger(trader_name: str) -> pd.DataFrame:
         frame["Action"] = frame["Action"].astype(str).str.strip().str.upper()
     for column in ["Quantity", "Local_Asset_Price", "Total_JPY_Impact", "Remaining_JPY_Balance"]:
         if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce").astype(float)
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame
 
 
 def _net_holdings_from_ledger(member_ledger: pd.DataFrame) -> dict[str, float]:
+    """Calculate current holdings without pandas Decimal/object arithmetic."""
+    if member_ledger.empty or not {"Action", "Ticker", "Quantity"}.issubset(member_ledger.columns):
+        return {}
+
+    frame = member_ledger.copy()
+    frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)
+    frame["Action"] = frame["Action"].astype(str).str.strip().str.upper()
+    frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
+
+    holdings: dict[str, float] = {}
+    for _, row in frame.iterrows():
+        ticker = str(row.get("Ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        quantity = float(row.get("Quantity", 0.0) or 0.0)
+        action = str(row.get("Action", "")).strip().upper()
+        if action == "BUY":
+            holdings[ticker] = holdings.get(ticker, 0.0) + quantity
+        elif action == "SELL":
+            holdings[ticker] = holdings.get(ticker, 0.0) - quantity
+
+    return {ticker: quantity for ticker, quantity in holdings.items() if quantity > 0}
+
+
     """Calculate current holdings after converting Decimal quantities to numeric."""
     if member_ledger.empty or not {"Action", "Ticker", "Quantity"}.issubset(member_ledger.columns):
         return {}
@@ -132,6 +157,11 @@ def _get_member_portfolio_value(trader_name: str) -> float:
     """Calculate current portfolio value for a member."""
     fallback_allocation = _fallback_allocation_for_member(trader_name)
     trader_ledger = _load_member_ledger(trader_name)
+    if trader_ledger.empty:
+        return fallback_allocation
+
+    holdings = _net_holdings_from_ledger(trader_ledger)
+
     if trader_ledger.empty:
         return fallback_allocation
 
@@ -170,6 +200,7 @@ def _get_member_portfolio_value(trader_name: str) -> float:
 
     # Get cash balance
     if "Remaining_JPY_Balance" in trader_ledger.columns:
+        balances = pd.to_numeric(trader_ledger["Remaining_JPY_Balance"], errors="coerce").astype(float).dropna()
         balances = pd.to_numeric(trader_ledger["Remaining_JPY_Balance"], errors="coerce").dropna()
         cash = float(balances.iloc[-1]) if not balances.empty else fallback_allocation
     else:
