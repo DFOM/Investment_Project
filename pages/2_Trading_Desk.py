@@ -16,6 +16,32 @@ from decimal import Decimal
 SLIPPAGE_MIN = -0.0005
 SLIPPAGE_MAX = 0.0005
 FX_SPREAD = 0.0025  # 0.25% broker spread on USD/JPY
+METAL_TICKER_OPTIONS: dict[str, str] = {
+    "Manual ticker": "",
+    "Gold futures (GC=F)": "GC=F",
+    "Silver futures (SI=F)": "SI=F",
+    "Platinum futures (PL=F)": "PL=F",
+    "Palladium futures (PA=F)": "PA=F",
+    "Copper futures (HG=F)": "HG=F",
+}
+
+
+def _format_order_timestamp(value) -> str:
+    """Format database timestamps safely for pending-order labels."""
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        raw = str(value).strip()
+        return raw if raw else "Unknown time"
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _order_cancel_key(row: pd.Series, fallback_index: int) -> str:
+    """Return a stable Streamlit widget key for a pending order row."""
+    order_id = row.get("ID")
+    if pd.notna(order_id):
+        return f"cancel_order_id_{order_id}"
+    return f"cancel_order_{fallback_index}_{_format_order_timestamp(row.get('Timestamp', ''))}"
+
 
 def _is_jp_ticker(ticker: str) -> bool:
     return ticker.upper().endswith(".T")
@@ -30,7 +56,7 @@ def _load_team_members() -> list[str]:
     return get_active_member_names()
 
 
-def _get_current_holdings() -> dict[str, float]:
+def _get_current_holdings(trader_name: str | None = None) -> dict[str, float]:
     """Return {ticker: net_quantity} for all positions with qty > 0, parsed from ledger."""
     import pandas as pd
     df = get_database().get_ledger_df()
@@ -44,10 +70,22 @@ def _get_current_holdings() -> dict[str, float]:
     df["Ticker"] = df["Ticker"].astype(str).str.strip().str.upper()
     df["Action"] = df["Action"].astype(str).str.strip().str.upper()
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
-    buys = df[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
-    sells = df[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
-    net = buys.sub(sells, fill_value=0.0)
-    return {str(t): float(q) for t, q in net.items() if float(q) > 0}
+    if trader_name:
+        df = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
+        if df.empty:
+            return {}
+    totals: dict[str, float] = {}
+    for _, row in df.iterrows():
+        ticker = str(row.get("Ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        quantity = float(row.get("Quantity", 0.0) or 0.0)
+        action = str(row.get("Action", "")).strip().upper()
+        if action == "BUY":
+            totals[ticker] = totals.get(ticker, 0.0) + quantity
+        elif action == "SELL":
+            totals[ticker] = totals.get(ticker, 0.0) - quantity
+    return {ticker: quantity for ticker, quantity in totals.items() if quantity > 0}
 
 
 def _enrich_holdings(holdings: dict[str, float], usd_jpy: float) -> dict[str, dict]:
@@ -70,7 +108,7 @@ def _enrich_holdings(holdings: dict[str, float], usd_jpy: float) -> dict[str, di
     return rows
 
 
-def _get_avg_cost_jpy_per_share(ticker: str) -> float:
+def _get_avg_cost_jpy_per_share(ticker: str, trader_name: str | None = None) -> float:
     """Average JPY cost per share for *ticker* from all BUY rows in the ledger."""
     try:
         df = get_database().get_ledger_df()
@@ -80,6 +118,8 @@ def _get_avg_cost_jpy_per_share(ticker: str) -> float:
         df["Action"] = df["Action"].astype(str).str.strip().str.upper()
         df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
         df["Total_JPY_Impact"] = pd.to_numeric(df["Total_JPY_Impact"], errors="coerce").fillna(0)
+        if trader_name:
+            df = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
         buys = df[(df["Ticker"] == ticker.upper().strip()) & (df["Action"] == "BUY")]
         total_qty = buys["Quantity"].sum()
         if total_qty <= 0:
@@ -108,20 +148,35 @@ def _shares_from_jpy(
     is_jp: bool,
     fx: float | None,
 ) -> float | None:
-    """Max shares purchasable from jpy_budget after commission and FX spread."""
+    """Estimate shares purchasable from JPY budget after fees/spread.
+
+    For JP tickers, commission is value-based, so we solve for shares using the
+    commission rate with min/max bounds approximation instead of subtracting a
+    fixed tiny constant.
+    """
     if price is None or price <= 0:
         return None
     
-    # Estimate commission for calculation purposes
-    # For JSE: ~0.1% (conservative estimate of 0.099%)
-    # For US: ~¥150 (approximate $1 at 150 rate)
-    estimated_commission = 0.001 if is_jp else 150.0
+    if is_jp:
+        # Approximate Rakuten JP commission schedule for sizing preview.
+        # commission = min(max(0.099% * notional, 99), 487.5)
+        commission_rate = 0.00099
+        min_commission = 99.0
+        max_commission = 487.5
+
+        # First pass: percentage branch
+        shares = jpy_budget / (price * (1.0 + commission_rate))
+        notional = shares * price
+        commission = min(max(notional * commission_rate, min_commission), max_commission)
+
+        # Second pass: stabilize against min/max branch.
+        spendable = max(0.0, jpy_budget - commission)
+        return spendable / price if price > 0 else 0.0
+
+    estimated_commission = 150.0
     net_jpy = jpy_budget - estimated_commission
-    
     if net_jpy <= 0:
         return 0.0
-    if is_jp:
-        return net_jpy / price
     if fx is None or fx <= 0:
         return None
     cost_per_share_jpy = price * fx * (1.0 + FX_SPREAD)
@@ -247,6 +302,8 @@ def main() -> None:
     with col_action_top:
         action = st.radio("Action", ["Buy", "Sell"], horizontal=True)
 
+    selected_trader = authorized_by if authorized_by != "-- Select group member --" else None
+
     # Clear stale estimate whenever action changes (prevents old BUY firing as SELL)
     if st.session_state.get("_last_action") != action:
         st.session_state["trade_estimate"] = None
@@ -256,7 +313,11 @@ def main() -> None:
     holdings: dict[str, float] = {}
     enriched: dict[str, dict] = {}
     if action == "Sell":
-        holdings = _get_current_holdings()
+        if selected_trader is None:
+            st.info("Select a member to view only that member's sellable positions.")
+            holdings = {}
+        else:
+            holdings = _get_current_holdings(selected_trader)
         if holdings:
             usd_jpy_live = get_current_usd_jpy(fallback=150.0) or 150.0
             with st.spinner("Fetching live prices for your positions…"):
@@ -299,11 +360,21 @@ def main() -> None:
             if prefetched:
                 st.session_state["last_trade_ticker"] = prefetched
             default_ticker = str(st.session_state.get("last_trade_ticker", "")).strip().upper()
-            ticker = st.text_input(
-                "Ticker Symbol",
-                value=default_ticker,
-                placeholder="AAPL or 7203.T",
-            ).strip().upper()
+            metal_choice = st.selectbox(
+                "Quick Metals / Commodities",
+                list(METAL_TICKER_OPTIONS.keys()),
+                help="Choose a yfinance metals futures ticker, or leave as Manual ticker to type stocks/ETFs yourself.",
+            )
+            selected_metal_ticker = METAL_TICKER_OPTIONS[metal_choice]
+            if selected_metal_ticker:
+                ticker = selected_metal_ticker
+                st.caption(f"Selected {metal_choice}. You can buy/sell it like any other ticker in this simulation.")
+            else:
+                ticker = st.text_input(
+                    "Ticker Symbol",
+                    value=default_ticker,
+                    placeholder="AAPL, 7203.T, GC=F, SI=F, GOLD, or SILVER",
+                ).strip().upper()
             # Clear stale estimate when buy ticker changes
             if st.session_state.get("_last_ticker") != ticker:
                 st.session_state["trade_estimate"] = None
@@ -352,13 +423,13 @@ def main() -> None:
     preview_price: float | None = st.session_state.get("_preview_price")
     preview_fx: float | None = st.session_state.get("_preview_fx")
     is_jp = _is_jp_ticker(ticker) if ticker else True
-    cash_balance = get_cash_balance()
+    cash_balance = get_cash_balance(selected_trader) if selected_trader else 0.0
 
     # Sell-specific context ── enriched data + cost basis
     sell_data: dict = enriched.get(ticker, {}) if action == "Sell" and ticker else {}
     held_qty: float = sell_data.get("qty", 0.0)
     position_value_jpy: float = sell_data.get("value_jpy", 0.0)
-    avg_cost_per_share = _get_avg_cost_jpy_per_share(ticker) if action == "Sell" and ticker else 0.0
+    avg_cost_per_share = _get_avg_cost_jpy_per_share(ticker, selected_trader) if action == "Sell" and ticker else 0.0
 
     def _proceeds_preview(qty: float) -> tuple[float, float | None]:
         """(approx_proceeds_jpy, profit_jpy | None) for a sell of *qty* shares."""
@@ -563,7 +634,7 @@ def main() -> None:
 
         # ── SELL P&L SUMMARY ───────────────────────────────────────────────────
         if est.get("action") == "SELL":
-            avg_cost = _get_avg_cost_jpy_per_share(est["ticker"])
+            avg_cost = _get_avg_cost_jpy_per_share(est["ticker"], est.get("authorized_by"))
             proceeds_jpy = abs(est["total_jpy_impact"])
             sp1, sp2, sp3 = st.columns(3)
             sp1.metric("Sale Proceeds", f"¥{proceeds_jpy:,.0f}")
@@ -613,7 +684,7 @@ def main() -> None:
                             mode=_mode_map.get(est["sizing_mode"], "SHARES"),
                             value=f"{est['quantity']:.6f}",
                             rationale=est["rationale"],
-                                auth_code=auth_code,
+                            auth_code=auth_code,
                         )
                     except Exception as exc:
                         result = {"status": "error", "message": str(exc)}
@@ -623,18 +694,21 @@ def main() -> None:
                         f"{est['ticker']} will execute at next market open."
                     )
                     st.session_state["trade_estimate"] = None
+                    get_database.cache_clear()
+                    st.cache_data.clear()
+                    st.rerun()
                 else:
                     st.error(f"\u274c Queue failed: {result.get('message', 'Unknown error.')}")
             else:
                 with st.spinner("Submitting trade to Google Sheets\u2026"):
                     try:
                         result = execute_trade(
-                                action=est["action"],
-                                ticker=est["ticker"],
-                                quantity=est["quantity"],
-                                trader_name=est["authorized_by"],
-                                rationale=est["rationale"],
-                                auth_code=auth_code,
+                            action=est["action"],
+                            ticker=est["ticker"],
+                            quantity=est["quantity"],
+                            trader_name=est["authorized_by"],
+                            rationale=est["rationale"],
+                            auth_code=auth_code,
                         )
                     except Exception as exc:
                         result = {"status": "error", "message": str(exc)}
@@ -659,11 +733,13 @@ def main() -> None:
         ob_df = get_database().get_order_book_df()
         pending = pd.DataFrame(columns=ob_df.columns)
         if not ob_df.empty and "Status" in ob_df.columns:
-            pending = ob_df[ob_df["Status"] == "PENDING"].reset_index(drop=True)
+            normalized_status = ob_df["Status"].astype(str).str.strip().str.upper()
+            pending = ob_df[normalized_status.eq("PENDING")].reset_index(drop=True)
 
         if pending.empty:
             st.info("No pending orders.")
         else:
+            st.caption("Showing all queued orders for the team so pending orders are never hidden by the member selector.")
             exec_col, _ = st.columns([2, 3])
             with exec_col:
                 if st.button(
@@ -699,33 +775,35 @@ def main() -> None:
                     st.rerun()
 
             for i, row in pending.iterrows():
-                ticker = row.get('Ticker', '?').strip().upper()
+                ticker = str(row.get("Ticker", "?")).strip().upper()
+                action = str(row.get("Action", "?")).strip().upper()
+                queued_at = _format_order_timestamp(row.get("Timestamp", ""))
                 try:
                     company_name = get_company_name(ticker)
                 except Exception:
                     company_name = ticker
                 
-                action_emoji = "🛒" if row.get('Action', '').upper() == "BUY" else "💰"
+                action_emoji = "🛒" if action == "BUY" else "💰"
                 label = (
-                    f"{action_emoji} {row.get('Action', '?')} {row.get('Value', '?')} ({company_name}) — "
-                    f"Mode: {row.get('Mode', '?')} — {row.get('Timestamp', '')[:16].replace('T', ' ')} UTC"
+                    f"{action_emoji} {action} {row.get('Value', '?')} shares ({company_name}) — "
+                    f"Mode: {row.get('Mode', '?')} — {queued_at}"
                 )
                 with st.expander(label, expanded=False):
                     detail_cols = st.columns([3, 1])
                     with detail_cols[0]:
                         st.markdown(
                             f"**Ticker:** {ticker} ({company_name})  \n"
-                            f"**Action:** {row.get('Action', '')}  \n"
+                            f"**Action:** {action}  \n"
                             f"**Mode:** {row.get('Mode', '')}  \n"
                             f"**Value:** {row.get('Value', '')}  \n"
                             f"**Trader:** {row.get('Trader_Name', 'N/A')}  \n"
                             f"**Rationale:** {row.get('Rationale', '')}  \n"
-                            f"**Queued at:** {row.get('Timestamp', '')}"
+                            f"**Queued at:** {queued_at}"
                         )
                     with detail_cols[1]:
                         if st.button(
                             "\u274c Cancel Order",
-                            key=f"cancel_order_{i}_{row.get('Timestamp', i)}",
+                            key=_order_cancel_key(row, i),
                             use_container_width=True,
                         ):
                             ts = str(row.get("Timestamp", ""))
