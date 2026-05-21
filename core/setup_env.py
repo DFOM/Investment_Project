@@ -164,22 +164,15 @@ def initialize_historical(path: Path = HISTORICAL_PATH) -> bool:
 
 
 def setup_environment() -> dict[str, str]:
-    """Return the Google Sheets connection status.
+    """Return the PostgreSQL connection status for page sidebars."""
+    # Lazy import to avoid circular dependency.
+    from core.database import get_connection_status  # noqa: PLC0415
 
-    Local CSV/JSON files are no longer the authoritative data store — all
-    trade and performance data lives in Google Sheets.  This function now
-    checks the live connection and returns a status dict that pages can
-    display in their sidebars.
-    """
-    # Lazy import to avoid circular dependency (database imports STARTING_JPY_BALANCE
-    # from this module inside a method, not at module level).
-    from core.database import get_google_sheets_connection_status  # noqa: PLC0415
-
-    status = get_google_sheets_connection_status()
+    status = get_connection_status()
     return {
-        "google_sheets": "connected" if status["connected"] else "disconnected",
-        "spreadsheet_title": status.get("spreadsheet_title") or "N/A",
-        "message": status.get("message") or "",
+        "postgresql": "connected" if status["connected"] else "disconnected",
+        "database_name": status.get("database_name") or "N/A",
+        "message": status.get("message") or status.get("error") or "",
     }
 
 
