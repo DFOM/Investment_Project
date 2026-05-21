@@ -14,6 +14,13 @@ from core.setup_env import LEDGER_PATH
 
 _ALLOWED_TIMEFRAMES: Final[set[str]] = {"D", "W", "M"}
 _TSE_DIGIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d{4}$")
+_METAL_TICKER_ALIASES: Final[dict[str, str]] = {
+    "GOLD": "GC=F",
+    "SILVER": "SI=F",
+    "PLATINUM": "PL=F",
+    "PALLADIUM": "PA=F",
+    "COPPER": "HG=F",
+}
 _YFINANCE_USDJPY_SYMBOL: Final[str] = "JPY=X"
 _DEFAULT_PRICE_FALLBACK: Final[float] = 0.0
 _DEFAULT_USDJPY_FALLBACK: Final[float] = 150.0
@@ -33,7 +40,7 @@ def _normalize_ticker(ticker: str) -> str:
     if _TSE_DIGIT_PATTERN.match(symbol):
         return f"{symbol}.T"
 
-    return symbol
+    return _METAL_TICKER_ALIASES.get(symbol, symbol)
 
 
 def _is_positive_number(value: object) -> bool:
