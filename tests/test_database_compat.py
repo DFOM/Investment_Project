@@ -282,6 +282,9 @@ class DatabaseCompatibilityTests(unittest.TestCase):
         self.assertIn('quantity = _d(row.get("Quantity", 0) or 0)', holdings_section)
         self.assertIn('totals[ticker] = totals.get(ticker, Decimal("0")) + quantity', holdings_section)
         self.assertIn('totals[ticker] = totals.get(ticker, Decimal("0")) - quantity', holdings_section)
+        self.assertIn('frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)', holdings_section)
+        self.assertIn('totals[ticker] = totals.get(ticker, 0.0) + quantity', holdings_section)
+        self.assertIn('totals[ticker] = totals.get(ticker, 0.0) - quantity', holdings_section)
         self.assertNotIn(".sub(", holdings_section)
 
     def test_pending_orders_update_status_by_id_when_available(self) -> None:
@@ -330,6 +333,10 @@ class DatabaseCompatibilityTests(unittest.TestCase):
         self.assertNotIn('@st.cache_data(ttl=300)\ndef _get_current_holdings', body)
         self.assertNotIn('ledger["Trader_Name"] == trader_name', body)
         self.assertNotIn('buys.sub(sells', body)
+        self.assertIn('frame[column] = pd.to_numeric(frame[column], errors="coerce")', body)
+        self.assertIn('quantities = pd.to_numeric(member_ledger["Quantity"], errors="coerce").fillna(0.0)', body)
+        self.assertIn("price_value = float(price)", body)
+        self.assertNotIn('ledger["Trader_Name"] == trader_name', body)
 
     def test_railway_build_uses_nixpacks_default_install_once(self) -> None:
         body = Path("railway.json").read_text(encoding="utf-8")
