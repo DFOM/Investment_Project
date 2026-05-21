@@ -24,6 +24,13 @@ RAKUTEN_US_COMMISSION_USD: Final[Decimal] = Decimal("1.00")  # $1 per trade
 SLIPPAGE_MIN: Final[float] = -0.0005
 SLIPPAGE_MAX: Final[float] = 0.0005
 _TSE_DIGIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\d{4}$")
+METAL_TICKER_ALIASES: Final[dict[str, str]] = {
+    "GOLD": "GC=F",
+    "SILVER": "SI=F",
+    "PLATINUM": "PL=F",
+    "PALLADIUM": "PA=F",
+    "COPPER": "HG=F",
+}
 
 
 def calculate_commission(ticker: str, transaction_value_jpy: Decimal, fx_rate: Decimal | None = None) -> Decimal:
@@ -81,7 +88,7 @@ def _normalize_ticker(ticker: str) -> str:
         raise ValueError("ticker cannot be empty.")
     if _TSE_DIGIT_PATTERN.match(symbol):
         return f"{symbol}.T"
-    return symbol
+    return METAL_TICKER_ALIASES.get(symbol, symbol)
 
 
 def _database_ready():
@@ -100,31 +107,84 @@ def _load_ledger() -> pd.DataFrame:
     return df
 
 
-def _latest_balance() -> float:
+def _allocation_for_trader(trader_name: str | None) -> float | None:
+    """Return the configured initial allocation for one trader, if available."""
+    if not trader_name:
+        return None
+    try:
+        from core.database import resolve_member_initial_allocations
+
+        allocations = resolve_member_initial_allocations()
+        for name, allocation in allocations.items():
+            if name.casefold() == trader_name.strip().casefold():
+                return float(allocation)
+    except Exception:
+        return None
+    return None
+
+
+def _latest_balance(trader_name: str | None = None) -> float:
+    allocation = _allocation_for_trader(trader_name)
     df = _load_ledger()
     if df.empty:
+        if trader_name:
+            return allocation if allocation is not None else 0.0
         return STARTING_JPY_BALANCE
 
-    value = df["Remaining_JPY_Balance"].dropna()
-    if value.empty:
-        return STARTING_JPY_BALANCE
-    return float(value.iloc[-1])
+    if trader_name:
+        scoped = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
+        value = scoped["Remaining_JPY_Balance"].dropna()
+        if not value.empty:
+            return float(value.iloc[-1])
+        return allocation if allocation is not None else 0.0
+
+    latest_by_trader = (
+        df.dropna(subset=["Remaining_JPY_Balance"])
+        .sort_values("Timestamp")
+        .groupby("Trader_Name")["Remaining_JPY_Balance"]
+        .last()
+    )
+    if not latest_by_trader.empty:
+        return float(latest_by_trader.sum())
+
+    return STARTING_JPY_BALANCE
 
 
-def _current_holdings() -> dict[str, Decimal]:
+def _current_holdings(trader_name: str | None = None) -> dict[str, Decimal]:
     df = _load_ledger()
     if df.empty:
         return {}
 
-    buy = df.loc[df["Action"] == "BUY"].groupby("Ticker")["Quantity"].sum()
-    sell = df.loc[df["Action"] == "SELL"].groupby("Ticker")["Quantity"].sum()
-    net = buy.sub(sell, fill_value=0.0)
+    if trader_name:
+        df = df[df["Trader_Name"].astype(str).str.casefold() == trader_name.strip().casefold()]
+        if df.empty:
+            return {}
+
+    if not {"Action", "Ticker", "Quantity"}.issubset(df.columns):
+        return {}
+
+    frame = df.copy()
+    frame["Quantity"] = pd.to_numeric(frame["Quantity"], errors="coerce").fillna(0.0).astype(float)
+    frame["Action"] = frame["Action"].astype(str).str.strip().str.upper()
+    frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
+
+    totals: dict[str, float] = {}
+    for _, row in frame.iterrows():
+        ticker = str(row.get("Ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        quantity = float(row.get("Quantity", 0.0) or 0.0)
+        action = str(row.get("Action", "")).strip().upper()
+        if action == "BUY":
+            totals[ticker] = totals.get(ticker, 0.0) + quantity
+        elif action == "SELL":
+            totals[ticker] = totals.get(ticker, 0.0) - quantity
 
     holdings: dict[str, Decimal] = {}
-    for ticker, quantity in net.items():
-        qty_value = _d(float(quantity))
+    for ticker, quantity in totals.items():
+        qty_value = _d(quantity)
         if qty_value > 0:
-            holdings[str(ticker)] = qty_value
+            holdings[ticker] = qty_value
     return holdings
 
 
@@ -207,7 +267,7 @@ def execute_trade(
         return {
             "status": "error",
             "message": "Trader_Name is required",
-            "remaining_jpy_balance": _latest_balance(),
+            "remaining_jpy_balance": _latest_balance(student),
         }
 
     if auth_code != "AUTO" and student.casefold() != "system":
@@ -215,7 +275,7 @@ def execute_trade(
             return {
                 "status": "error",
                 "message": f"Authentication failed for {student}. Invalid code.",
-                "remaining_jpy_balance": _latest_balance(),
+                "remaining_jpy_balance": _latest_balance(student),
             }
 
     if not _is_market_open(symbol):
@@ -223,7 +283,7 @@ def execute_trade(
             "status": "error",
             "message": f"{_exchange_name(symbol)} market is currently closed. Order rejected.",
             "exchange": _exchange_name(symbol),
-            "remaining_jpy_balance": _latest_balance(),
+            "remaining_jpy_balance": _latest_balance(student),
         }
 
     qty = _d(quantity)
@@ -235,7 +295,7 @@ def execute_trade(
         return {
             "status": "error",
             "message": f"Live price unavailable for {symbol}. Order rejected.",
-            "remaining_jpy_balance": _latest_balance(),
+            "remaining_jpy_balance": _latest_balance(student),
         }
 
     last_seen_price = _d(last_seen_price_raw)
@@ -253,7 +313,7 @@ def execute_trade(
             return {
                 "status": "error",
                 "message": "USD/JPY FX rate unavailable. Order rejected.",
-                "remaining_jpy_balance": _latest_balance(),
+                "remaining_jpy_balance": _latest_balance(student),
             }
 
         live_mid_fx_rate = _d(fx_quote["live_mid_market_rate"])
@@ -271,10 +331,10 @@ def execute_trade(
     else:
         total_jpy_impact = gross_jpy_mid - fx_conversion_fee_paid - commission_paid
 
-    previous_balance = _d(_latest_balance())
+    previous_balance = _d(_latest_balance(student))
 
     if normalized_action == "SELL":
-        holdings = _current_holdings()
+        holdings = _current_holdings(student)
         available_qty = holdings.get(symbol, Decimal("0"))
         if qty > available_qty:
             return {
@@ -332,17 +392,9 @@ def execute_trade(
     }
 
 
-def get_cash_balance() -> float:
-    """Return the current JPY cash balance from the cached ledger df.
-
-    Re-uses whichever cached read is already in-flight for the current page
-    render instead of issuing a second Sheets API call.
-    """
-    df = get_cached_ledger_df()
-    if df.empty:
-        return STARTING_JPY_BALANCE
-    bal = df["Remaining_JPY_Balance"].dropna()
-    return float(bal.iloc[-1]) if not bal.empty else STARTING_JPY_BALANCE
+def get_cash_balance(trader_name: str | None = None) -> float:
+    """Return current JPY cash balance, optionally scoped to one trader."""
+    return _latest_balance(trader_name)
 
 
 def queue_order(
@@ -392,6 +444,7 @@ def queue_order(
     }
 
     get_database().append_order_book_row(row)
+    clear_data_cache()
 
     return {
         "status": "queued",
@@ -425,7 +478,7 @@ def process_pending_orders() -> list[dict]:
     if ob_df.empty or "Status" not in ob_df.columns:
         return []
 
-    pending = ob_df[ob_df["Status"].astype(str).str.upper() == "PENDING"].reset_index(drop=True)
+    pending = ob_df[ob_df["Status"].astype(str).str.strip().str.upper() == "PENDING"].reset_index(drop=True)
     if pending.empty:
         return []
 
@@ -443,6 +496,8 @@ def process_pending_orders() -> list[dict]:
             continue
 
         timestamp = str(order.get("Timestamp", "")).strip()
+        order_id = order.get("ID")
+        order_key = int(order_id) if pd.notna(order_id) else timestamp
 
         if not _is_market_open(symbol):
             results.append({
@@ -462,7 +517,7 @@ def process_pending_orders() -> list[dict]:
         try:
             quantity = float(value_str)
         except (ValueError, TypeError):
-            db.update_order_status(timestamp, "FAILED")
+            db.update_order_status(order_key, "FAILED")
             results.append({
                 "ticker": symbol,
                 "order_timestamp": timestamp,
@@ -472,7 +527,7 @@ def process_pending_orders() -> list[dict]:
             continue
 
         if quantity <= 0:
-            db.update_order_status(timestamp, "FAILED")
+            db.update_order_status(order_key, "FAILED")
             results.append({
                 "ticker": symbol,
                 "order_timestamp": timestamp,
@@ -493,9 +548,9 @@ def process_pending_orders() -> list[dict]:
         result["order_timestamp"] = timestamp
 
         if result.get("status") == "success":
-            db.update_order_status(timestamp, "EXECUTED")
+            db.update_order_status(order_key, "EXECUTED")
         else:
-            db.update_order_status(timestamp, "FAILED")
+            db.update_order_status(order_key, "FAILED")
 
         results.append(result)
 
