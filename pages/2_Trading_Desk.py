@@ -367,7 +367,7 @@ def main() -> None:
             prefetched = str(st.session_state.pop("trade_prefill_ticker", "")).strip().upper()
             if prefetched:
                 st.session_state["last_trade_ticker"] = prefetched
-            default_ticker = _normalize_entry_ticker(str(st.session_state.get("last_trade_ticker", "")))
+            default_ticker = str(st.session_state.get("last_trade_ticker", "")).strip().upper()
             metal_choice = st.selectbox(
                 "Quick Metals / Commodities",
                 list(METAL_TICKER_OPTIONS.keys()),
@@ -378,11 +378,11 @@ def main() -> None:
                 ticker = selected_metal_ticker
                 st.caption(f"Selected {metal_choice}. You can buy/sell it like any other ticker in this simulation.")
             else:
-                ticker = _normalize_entry_ticker(st.text_input(
+                ticker = st.text_input(
                     "Ticker Symbol",
                     value=default_ticker,
                     placeholder="AAPL, 7203.T, GC=F, SI=F, GOLD, or SILVER",
-                ))
+                ).strip().upper()
             # Clear stale estimate when buy ticker changes
             if st.session_state.get("_last_ticker") != ticker:
                 st.session_state["trade_estimate"] = None
