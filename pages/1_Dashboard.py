@@ -9,7 +9,10 @@ from core.database import (
     get_database,
     get_cached_ledger_df,
     get_cached_performance_df,
+    get_simulation_settings,
     record_daily_performance,
+    resolve_member_initial_allocations,
+    get_outstanding_borrowing_by_member,
 )
 from core.market_data import get_current_usd_jpy, get_live_price
 from core.setup_env import STARTING_JPY_BALANCE, setup_environment
@@ -81,6 +84,134 @@ def _load_ledger() -> pd.DataFrame:
     return df.dropna(subset=["Timestamp"]).sort_values("Timestamp")
 
 
+def _load_pending_orders() -> pd.DataFrame:
+    """Return normalized pending order rows for portfolio previews."""
+    try:
+        orders = get_database().get_order_book_df().copy()
+    except Exception:
+        return pd.DataFrame()
+    if orders.empty or "Status" not in orders.columns:
+        return pd.DataFrame()
+    orders["Status"] = orders["Status"].astype(str).str.strip().str.upper()
+    if "Action" not in orders.columns:
+        orders["Action"] = ""
+    if "Ticker" not in orders.columns:
+        orders["Ticker"] = ""
+    if "Value" not in orders.columns:
+        orders["Value"] = 0
+    orders["Action"] = orders["Action"].astype(str).str.strip().str.upper()
+    orders["Ticker"] = orders["Ticker"].astype(str).str.strip().str.upper()
+    orders["Value"] = pd.to_numeric(orders["Value"], errors="coerce").fillna(0.0)
+    if "Trader_Name" in orders.columns:
+        orders["Trader_Name"] = orders["Trader_Name"].astype(str).str.strip()
+    return orders[orders["Status"].eq("PENDING")].reset_index(drop=True)
+
+
+def _pending_buy_value_jpy(pending_orders: pd.DataFrame, usd_jpy: float) -> tuple[float, int, list[str]]:
+    """Estimate notional value of pending BUY orders without deducting cash yet."""
+    if pending_orders.empty:
+        return 0.0, 0, []
+
+    pending_buys = pending_orders[pending_orders["Action"].eq("BUY")].copy()
+    if pending_buys.empty:
+        return 0.0, 0, []
+
+    total_value = 0.0
+    skipped: list[str] = []
+    for _, order in pending_buys.iterrows():
+        ticker = str(order.get("Ticker", "")).strip().upper()
+        quantity = float(order.get("Value", 0.0) or 0.0)
+        if not ticker or quantity <= 0:
+            continue
+        price = get_live_price(ticker, fallback=None)
+        if price is None:
+            skipped.append(ticker)
+            continue
+        fx = 1.0 if _is_jp_ticker(ticker) else usd_jpy
+        total_value += quantity * float(price) * fx
+
+    return total_value, len(pending_buys), skipped
+
+
+def _resample_history_for_timeframe(history: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Return daily/weekly/monthly last-value portfolio history for charting."""
+    if history.empty:
+        return pd.DataFrame(columns=["date", "portfolio_value_jpy"])
+
+    rule_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
+    if timeframe not in rule_map:
+        raise ValueError("timeframe must be one of Daily, Weekly, or Monthly")
+
+    frame = history.copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_convert(None)
+    frame["portfolio_value_jpy"] = pd.to_numeric(frame["portfolio_value_jpy"], errors="coerce")
+    frame = frame.dropna(subset=["date", "portfolio_value_jpy"]).sort_values("date")
+    if frame.empty:
+        return pd.DataFrame(columns=["date", "portfolio_value_jpy"])
+
+    daily = (
+        frame.assign(date=frame["date"].dt.normalize())
+        .drop_duplicates(subset=["date"], keep="last")
+        .set_index("date")
+        .sort_index()
+    )
+    rule = rule_map[timeframe]
+    if rule == "D":
+        out = daily.reset_index()
+    else:
+        out = daily[["portfolio_value_jpy"]].resample(rule).last().dropna().reset_index()
+    return out[["date", "portfolio_value_jpy"]]
+
+
+def _build_portfolio_history_view(
+    historical: pd.DataFrame,
+    target_name: str,
+    scoped_ledger: pd.DataFrame,
+    starting_capital: float,
+    current_total: float,
+    timeframe: str,
+) -> pd.DataFrame:
+    """Build chart history from stored snapshots plus today's live value."""
+    today = pd.Timestamp.utcnow().tz_localize(None).normalize()
+    if historical.empty:
+        hist_view = pd.DataFrame(columns=["date", "portfolio_value_jpy"])
+    else:
+        trader_col = historical.get("Trader_Name", pd.Series(["All Team"] * len(historical)))
+        hist_view = historical[trader_col.astype(str) == target_name].copy()
+
+    if not hist_view.empty:
+        hist_view["date"] = pd.to_datetime(hist_view["date"], errors="coerce", utc=True).dt.tz_convert(None)
+        hist_view["portfolio_value_jpy"] = pd.to_numeric(hist_view["portfolio_value_jpy"], errors="coerce")
+        hist_view = hist_view.dropna(subset=["date", "portfolio_value_jpy"])
+    else:
+        hist_view = pd.DataFrame(columns=["date", "portfolio_value_jpy"])
+
+    start_candidates = [today]
+    if not hist_view.empty:
+        start_candidates.append(hist_view["date"].min().normalize())
+    if not scoped_ledger.empty and "Timestamp" in scoped_ledger.columns:
+        first_trade = pd.to_datetime(scoped_ledger["Timestamp"], errors="coerce", utc=True).min()
+        if pd.notna(first_trade):
+            start_candidates.append(pd.Timestamp(first_trade).tz_localize(None).normalize())
+    start_date = min(start_candidates)
+
+    rows = []
+    if hist_view.empty or hist_view["date"].min().normalize() > start_date:
+        rows.append({"date": start_date, "portfolio_value_jpy": float(starting_capital)})
+    rows.append({"date": today, "portfolio_value_jpy": float(current_total)})
+
+    combined = pd.concat([hist_view, pd.DataFrame(rows)], ignore_index=True)
+    combined["date"] = pd.to_datetime(combined["date"], errors="coerce", utc=True).dt.tz_convert(None)
+    combined["portfolio_value_jpy"] = pd.to_numeric(combined["portfolio_value_jpy"], errors="coerce")
+    combined = (
+        combined.dropna(subset=["date", "portfolio_value_jpy"])
+        .assign(date=lambda df: df["date"].dt.normalize())
+        .sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+    )
+    return _resample_history_for_timeframe(combined, timeframe)
+
+
 def _load_historical() -> pd.DataFrame:
     out = get_cached_performance_df().copy()
     if out.empty:
@@ -117,6 +248,58 @@ def _weighted_avg_cost(ledger: pd.DataFrame) -> dict[str, float]:
         wac[str(ticker)] = float(total_cost / total_qty) if total_qty > 0 else 0.0
     return wac
 
+
+def _latest_member_cash_balances(ledger: pd.DataFrame) -> dict[str, float]:
+    """Latest cash for every active member; untraded members keep their allocation."""
+    settings = get_simulation_settings()
+    allocations = resolve_member_initial_allocations(settings["total_starting_capital_jpy"])
+    balances: dict[str, float] = {member: float(allocation) for member, allocation in allocations.items()}
+    if ledger.empty or "Remaining_JPY_Balance" not in ledger.columns or "Trader_Name" not in ledger.columns:
+        return balances
+
+    frame = ledger.copy()
+    frame["Remaining_JPY_Balance"] = pd.to_numeric(frame["Remaining_JPY_Balance"], errors="coerce")
+    frame = frame.dropna(subset=["Remaining_JPY_Balance"]).sort_values("Timestamp")
+    ignored = {"", "system", "all team"}
+    for trader, balance in frame.groupby("Trader_Name")["Remaining_JPY_Balance"].last().items():
+        trader_name = str(trader).strip()
+        if trader_name.casefold() in ignored:
+            continue
+        matched_member = next((member for member in balances if member.casefold() == trader_name.casefold()), trader_name)
+        balances[matched_member] = float(balance)
+    return balances
+
+
+def _latest_cash_for_scope(ledger: pd.DataFrame, selected_member: str, is_all: bool) -> float:
+    settings = get_simulation_settings()
+    balances = _latest_member_cash_balances(ledger)
+    if is_all:
+        return float(sum(balances.values())) if balances else float(settings["total_starting_capital_jpy"])
+    for member, balance in balances.items():
+        if member.casefold() == selected_member.casefold():
+            return float(balance)
+    allocations = resolve_member_initial_allocations(settings["total_starting_capital_jpy"])
+    return float(allocations.get(selected_member, 0.0))
+
+
+def _starting_capital_for_selection(selected_member: str, is_all: bool) -> float:
+    settings = get_simulation_settings()
+    if is_all:
+        return float(settings["total_starting_capital_jpy"])
+    allocations = resolve_member_initial_allocations(settings["total_starting_capital_jpy"])
+    return float(allocations.get(selected_member, 0.0))
+
+
+def _outstanding_borrowing_for_selection(selected_member: str, is_all: bool) -> float:
+    outstanding_map = get_outstanding_borrowing_by_member()
+    if not outstanding_map:
+        return 0.0
+    if is_all:
+        return float(sum(max(0.0, float(v or 0.0)) for v in outstanding_map.values()))
+    for trader, amount in outstanding_map.items():
+        if trader.strip().casefold() == selected_member.strip().casefold():
+            return max(0.0, float(amount or 0.0))
+    return 0.0
 
 def _is_jp_ticker(ticker: str) -> bool:
     return ticker.upper().endswith(".T")
@@ -328,7 +511,8 @@ def main() -> None:
             "pct_of_total_earnings": pct_of_total_earnings,
         }
     
-    is_all = selected == "All Team"
+    comparison_mode = view_mode == "Member Comparison"
+    is_all = selected == "All Team" or comparison_mode
     if is_all:
         scoped = ledger
     else:
@@ -343,11 +527,16 @@ def main() -> None:
     # ── Live FX rate ───────────────────────────────────────────────────────────
     usd_jpy = get_current_usd_jpy(fallback=150.0) or 150.0
 
+    # ── Pending order preview ─────────────────────────────────────────────────
+    pending_orders = _load_pending_orders()
+    if not is_all and not pending_orders.empty and "Trader_Name" in pending_orders.columns:
+        aliases = set(get_member_aliases(selected))
+        pending_orders = pending_orders[pending_orders["Trader_Name"].isin(aliases)].reset_index(drop=True)
+    pending_buy_value, pending_order_count, pending_skipped = _pending_buy_value_jpy(pending_orders, usd_jpy)
+
     # ── Cash balance ───────────────────────────────────────────────────────────
-    if ledger.empty:
-        cash = float(STARTING_JPY_BALANCE)
-    else:
-        cash = float(ledger["Remaining_JPY_Balance"].dropna().iloc[-1])
+    cash = _latest_cash_for_scope(ledger, selected, is_all)
+    starting_capital = _starting_capital_for_selection(selected, is_all)
 
     # ── Live holdings sync ─────────────────────────────────────────────────────
     holdings = _net_holdings(scoped)
@@ -370,9 +559,14 @@ def main() -> None:
 
     equity_jpy = float(positions_df["Market Value (JPY)"].sum()) if not positions_df.empty else 0.0
     
+    # Pending BUY orders are displayed as queued/reserved notional, not added
+    # to total value, because the same yen still exists as cash until execution.
+    gross_total = cash + equity_jpy
+    outstanding_borrowing = _outstanding_borrowing_for_selection(selected, is_all)
+    total = gross_total - outstanding_borrowing
+    deployable_cash = max(0.0, cash - pending_buy_value)
     if is_all:
-        total = cash + equity_jpy
-        roi = ((total - STARTING_JPY_BALANCE) / STARTING_JPY_BALANCE) * 100.0
+        roi = ((total - starting_capital) / starting_capital) * 100.0 if starting_capital else 0.0
 
     # ── KPI metrics ────────────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
@@ -385,18 +579,50 @@ def main() -> None:
         m2.metric("Member ROI", f"{member_metrics['roi']:+.2f}%")
         m3.metric("Member Earnings", format_currency(member_metrics["earnings"], "JPY"),
                  f"{member_metrics['pct_of_total_earnings']:+.1f}% of total")
-        m4.metric("Member Portfolio Value", format_currency(member_metrics["current_value"], "JPY"))
+        member_portfolio_value = cash + member_metrics["current_value"] - outstanding_borrowing
+        m4.metric(
+            "Member Portfolio Value",
+            format_currency(member_portfolio_value, "JPY"),
+            delta=f"{format_currency(pending_buy_value, 'JPY')} queued" if pending_buy_value else None,
+            delta_color="off",
+        )
+        current_history_total = member_portfolio_value
+        if outstanding_borrowing > 0:
+            st.caption(f"Outstanding borrowing deducted from member value: {format_currency(outstanding_borrowing, 'JPY')}.")
     elif view_mode == "Combined Portfolio":
         # Show combined portfolio metrics only when "All Team" is selected
         m1.metric("Total Portfolio Value", format_currency(total, "JPY"), help=f"Exact: \u00a5{total:,.2f}")
         m2.metric("Overall ROI", f"{roi:+.2f}%")
-        m3.metric("Shared Cash Balance", format_currency(cash, "JPY"), help=f"Exact: \u00a5{cash:,.2f}")
+        m3.metric(
+            "Shared Cash Balance",
+            format_currency(cash, "JPY"),
+            delta=f"{format_currency(pending_buy_value, 'JPY')} queued" if pending_buy_value else None,
+            delta_color="off",
+            help=f"Exact: ¥{cash:,.2f}. Deployable after queued BUY orders: ¥{deployable_cash:,.2f}",
+        )
         m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
+        current_history_total = total
+        if outstanding_borrowing > 0:
+            st.caption(f"Outstanding team borrowing deducted from total value: {format_currency(outstanding_borrowing, 'JPY')}.")
     elif view_mode == "Member Comparison":
         m1.metric("Total Portfolio Value", format_currency(total, "JPY"))
         m2.metric("Overall ROI", f"{roi:+.2f}%")
         m3.metric("Members", f"{len(active_members)}")
         m4.metric("USD/JPY (Live)", f"{usd_jpy:,.2f}")
+        current_history_total = total
+    else:
+        current_history_total = total
+
+    if pending_order_count:
+        st.caption(
+            f"Pending BUY orders total an estimated {format_currency(pending_buy_value, 'JPY')} "
+            "and are shown as queued/reserved notional only; they are not added to Total Portfolio Value "
+            "because the same yen is still included in cash until execution."
+        )
+    if pending_skipped:
+        st.warning(
+            "Could not price pending order(s): " + ", ".join(sorted(set(pending_skipped)))
+        )
 
     # ── Unrealized P&L table ───────────────────────────────────────────────────
     st.divider()
@@ -448,42 +674,42 @@ def main() -> None:
     # ── Portfolio value over time ──────────────────────────────────────────────
     st.divider()
     st.subheader("Portfolio Value Over Time")
-    
-    # Filter historical for the selected view
-    hist_view = pd.DataFrame()
-    if not historical.empty:
-        # Default to 'All Team' if the column is missing in older ledgers
-        trader_col = historical.get("Trader_Name", pd.Series(["All Team"] * len(historical)))
-        target_name = "All Team" if is_all else selected
-        hist_view = historical[trader_col == target_name].copy()
-        
-        # Ensure we only show daily data (one point per date)
-        if not hist_view.empty:
-            hist_view["date"] = pd.to_datetime(hist_view["date"])
-            # Group by date and keep the last value for each date (daily snapshot)
-            hist_view = hist_view.sort_values("date").drop_duplicates(subset=["date"], keep="last")
-            
-            # If member-specific, filter to start from their first trade
-            if not is_all and not scoped.empty:
-                first_trade_ts = pd.to_datetime(scoped["Timestamp"]).min()
-                # Convert to datetime64[ns] without timezone for proper comparison
-                first_trade_date = pd.Timestamp(first_trade_ts).normalize().tz_localize(None).to_numpy()
-                hist_view["date"] = pd.to_datetime(hist_view["date"]).dt.tz_localize(None)
-                hist_view = hist_view[hist_view["date"].values >= first_trade_date]
+    history_timeframe = st.radio(
+        "History timeframe",
+        ["Daily", "Weekly", "Monthly"],
+        horizontal=True,
+        key="portfolio_history_timeframe",
+    )
+    history_target = "All Team" if is_all else selected
+    hist_view = _build_portfolio_history_view(
+        historical=historical,
+        target_name=history_target,
+        scoped_ledger=scoped,
+        starting_capital=starting_capital,
+        current_total=current_history_total,
+        timeframe=history_timeframe,
+    )
 
     if not hist_view.empty:
         fig = px.line(
-            hist_view, x="date", y="portfolio_value_jpy",
-            title="Portfolio Value Over Time (Daily)", markers=True,
+            hist_view,
+            x="date",
+            y="portfolio_value_jpy",
+            title=f"Portfolio Value Over Time ({history_timeframe})",
+            markers=True,
         )
-        fig.add_hline(y=STARTING_JPY_BALANCE, line_dash="dot", line_color="gray", annotation_text="Starting Capital")
+        fig.add_hline(y=starting_capital, line_dash="dot", line_color="gray", annotation_text="Starting Capital")
         fig.update_xaxes(title_text="Date")
         fig.update_yaxes(title_text="Portfolio Value (¥)")
         st.plotly_chart(fig, use_container_width=True)
-    elif scoped.empty:
-        st.info("No data available for charting yet.")
+        latest_point = hist_view.sort_values("date").iloc[-1]
+        st.caption(
+            f"Showing {history_timeframe.lower()} snapshots for **{history_target}** through "
+            f"{pd.to_datetime(latest_point['date']).date().isoformat()}. "
+            "The latest point uses the current live portfolio value; stored daily snapshots are updated by the background worker."
+        )
     else:
-        st.info("No daily snapshots recorded yet. Buy or sell shares to generate performance data.")
+        st.info("No portfolio history available yet. The background worker records daily snapshots automatically.")
 
     # ── Allocation Analysis ────────────────────────────────────────────────────
     st.divider()
@@ -631,7 +857,10 @@ def main() -> None:
         
         member_perf_data = []
         for member in active_members:
-            metrics = _get_member_metrics(member, ledger, holdings, usd_jpy)
+            member_aliases = set(get_member_aliases(member))
+            member_ledger = ledger.loc[ledger["Trader_Name"].isin(member_aliases)].copy()
+            member_holdings = _net_holdings(member_ledger)
+            metrics = _get_member_metrics(member, member_ledger, member_holdings, usd_jpy)
             member_perf_data.append({
                 "Member": member,
                 "Total Spent (¥)": metrics["total_spent"],
@@ -639,7 +868,7 @@ def main() -> None:
                 "Earnings (¥)": metrics["earnings"],
                 "% of Total Earnings": metrics["pct_of_total_earnings"],
                 "ROI (%)": metrics["roi"],
-                "Portfolio Value (¥)": metrics["current_value"],
+                "Portfolio Value (¥)": _latest_cash_for_scope(ledger, member, False) + metrics["current_value"],
             })
         
         member_comp_df = pd.DataFrame(member_perf_data).sort_values("ROI (%)", ascending=False).reset_index(drop=True)

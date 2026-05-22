@@ -35,11 +35,17 @@ def list_members(include_inactive: bool = True) -> list[dict[str, Any]]:
         active = str(row.get("Active", "True")).lower() == "true"
         if not active and not include_inactive:
             continue
+        allocation_raw = row.get("Initial_Allocation_JPY", 0)
+        try:
+            allocation_jpy = float(allocation_raw) if str(allocation_raw).strip() else 0.0
+        except (TypeError, ValueError):
+            allocation_jpy = 0.0
         members.append({
             "name": str(row.get("Trader_Name", "")),
             "auth_code": str(row.get("Auth_Code", "")),
             "active": active,
-            "created_at": str(row.get("Created_At", ""))
+            "created_at": str(row.get("Created_At", "")),
+            "initial_allocation_jpy": allocation_jpy,
         })
     return sorted(members, key=lambda m: m["name"].casefold())
 

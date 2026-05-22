@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
-from core.database import get_cached_ledger_df
+from core.database import get_cached_ledger_df, get_simulation_settings, resolve_member_initial_allocations
 from core.market_data import get_current_usd_jpy, get_live_price
 from core.setup_env import STARTING_JPY_BALANCE, setup_environment
 from core.trade_executor import format_currency
@@ -159,6 +159,9 @@ def _load_ledger() -> pd.DataFrame:
     df["Timestamp"] = df["Timestamp"].map(_parse_ts)
     df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
     df["Action"] = df["Action"].astype(str).str.upper().str.strip()
+    for column in ["Quantity", "Local_Asset_Price", "Total_JPY_Impact", "Remaining_JPY_Balance"]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
     return df.dropna(subset=["Timestamp"]).sort_values("Timestamp")
 
 
@@ -182,10 +185,26 @@ def _weighted_avg_cost(ledger: pd.DataFrame) -> dict[str, float]:
 
 
 def _cash_balance(ledger: pd.DataFrame) -> float:
-    if ledger.empty:
-        return float(STARTING_JPY_BALANCE)
-    bal = ledger["Remaining_JPY_Balance"].dropna()
-    return float(bal.iloc[-1]) if not bal.empty else float(STARTING_JPY_BALANCE)
+    settings = get_simulation_settings()
+    allocations = resolve_member_initial_allocations(settings["total_starting_capital_jpy"])
+    balances = {member: float(allocation) for member, allocation in allocations.items()}
+    if ledger.empty or "Remaining_JPY_Balance" not in ledger.columns or "Trader_Name" not in ledger.columns:
+        return float(sum(balances.values())) if balances else float(STARTING_JPY_BALANCE)
+
+    frame = ledger.copy()
+    frame["Remaining_JPY_Balance"] = pd.to_numeric(frame["Remaining_JPY_Balance"], errors="coerce")
+    frame = frame.dropna(subset=["Remaining_JPY_Balance"]).sort_values("Timestamp")
+    ignored = {"", "system", "all team"}
+    for trader, balance in frame.groupby("Trader_Name")["Remaining_JPY_Balance"].last().items():
+        trader_name = str(trader).strip()
+        if trader_name.casefold() in ignored:
+            continue
+        matched_member = next((member for member in balances if member.casefold() == trader_name.casefold()), trader_name)
+        balances[matched_member] = float(balance)
+
+    if balances:
+        return float(sum(balances.values()))
+    return float(STARTING_JPY_BALANCE)
 
 
 # ── Core portfolio builder ────────────────────────────────────────────────────
@@ -814,7 +833,8 @@ def main() -> None:
     total = cash + equity_jpy
 
     # ── Top KPIs ───────────────────────────────────────────────────────────────
-    roi = (total - STARTING_JPY_BALANCE) / STARTING_JPY_BALANCE * 100.0
+    starting_capital = float(get_simulation_settings()["total_starting_capital_jpy"])
+    roi = (total - starting_capital) / starting_capital * 100.0 if starting_capital else 0.0
     total_pnl = equity_jpy - float(port_df["Cost Basis (JPY)"].sum()) if not port_df.empty else 0.0
 
     k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1])
