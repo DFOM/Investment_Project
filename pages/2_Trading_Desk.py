@@ -47,6 +47,14 @@ def _is_jp_ticker(ticker: str) -> bool:
     return ticker.upper().endswith(".T")
 
 
+def _normalize_entry_ticker(raw_ticker: str) -> str:
+    """Normalize manual ticker entry to match execution-layer conventions."""
+    symbol = str(raw_ticker).strip().upper()
+    if symbol.isdigit() and len(symbol) == 4:
+        return f"{symbol}.T"
+    return symbol
+
+
 def _load_recent_ledger(n: int = 5) -> pd.DataFrame:
     return get_database().get_recent_ledger_df(n)
 
@@ -350,11 +358,11 @@ def main() -> None:
             st.session_state["_sell_ticker_select"] = ticker
         elif action == "Sell" and not holdings:
             st.warning("You have no open positions to sell.")
-            ticker = st.text_input(
+            ticker = _normalize_entry_ticker(st.text_input(
                 "Ticker Symbol",
                 value="",
                 placeholder="AAPL or 7203.T",
-            ).strip().upper()
+            ))
         else:
             prefetched = str(st.session_state.pop("trade_prefill_ticker", "")).strip().upper()
             if prefetched:
